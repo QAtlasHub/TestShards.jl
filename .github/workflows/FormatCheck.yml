@@ -1,0 +1,26 @@
+name: Format Check
+on:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  format-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: '1'
+      - name: JuliaFormatter 2.10.1 check
+        shell: julia --color=yes {0}
+        run: |
+          using Pkg
+          Pkg.activate(; temp = true)   # clean env — a shared depot's compat can cap the resolve
+          Pkg.add(PackageSpec(name = "JuliaFormatter", version = "2.10.1"))
+          using JuliaFormatter
+          if !format("."; verbose = true, overwrite = false)
+              println(stderr, "Not formatted. Run locally with the SAME version:")
+              println(stderr, "  julia -e 'using Pkg; Pkg.activate(;temp=true); Pkg.add(PackageSpec(name=\"JuliaFormatter\", version=\"2.10.1\")); using JuliaFormatter; format(\".\")'")
+              exit(1)
+          end
+          println("All files properly formatted.")
