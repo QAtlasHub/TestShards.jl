@@ -74,6 +74,19 @@ Timings are emitted even when a shard fails — a red shard's files still took h
 took, and dropping that would make the next plan fall back to a stale estimate exactly where the
 suite is changing.
 
+## One requirement sharding imposes on your suite
+
+**Every test file must be independently includable.** Files are included into a shared `Main`,
+and a shard receives an arbitrary subset — so a file that relies on a helper defined in another
+file works unsharded and breaks the moment the two land in different shards. Two symptoms worth
+grepping for before you adopt this:
+
+- a helper defined at top level in more than one file (`WARNING: Method definition … overwritten`
+  during a full run is the tell), and
+- a file that uses a name it never defines or imports.
+
+Give each file its own helpers, or put shared ones in a non-`test_*.jl` file that each includes.
+
 ## Scope
 
 This partitions a suite across **CI jobs**. It does not run tests in parallel *within* a job —

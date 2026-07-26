@@ -1,7 +1,7 @@
 using Test, TestShards
 
 "Build a throwaway suite; returns its root."
-function fixture(dirs_files)
+function universe_fixture(dirs_files)
     root = mktempdir()
     for (d, fs) in dirs_files
         mkpath(joinpath(root, d))
@@ -13,7 +13,9 @@ function fixture(dirs_files)
 end
 
 @testset "discovery is the default — nothing to declare, nothing to drift" begin
-    root = fixture(["core" => ["test_a.jl", "test_b.jl"], "solver" => ["test_c.jl"]])
+    root = universe_fixture([
+        "core" => ["test_a.jl", "test_b.jl"], "solver" => ["test_c.jl"]
+    ])
     u = universe(root)
     @test u.dirs == ["core/", "solver/"]
     @test [filekey(d, f) for (d, f) in u.files] == ["core/test_a.jl", "core/test_b.jl", "solver/test_c.jl"]
@@ -27,13 +29,15 @@ end
 end
 
 @testset "non-test files and ci/ are not units" begin
-    root = fixture(["core" => ["test_a.jl", "helpers.jl"], "ci" => ["test_ignored.jl"]])
+    root = universe_fixture([
+        "core" => ["test_a.jl", "helpers.jl"], "ci" => ["test_ignored.jl"]
+    ])
     u = universe(root)
     @test [f for (_, f) in u.files] == ["test_a.jl"]
 end
 
 @testset "completeness guard fires ONLY when dirs is pinned" begin
-    root = fixture(["core" => ["test_a.jl"], "solver" => ["test_c.jl"]])
+    root = universe_fixture(["core" => ["test_a.jl"], "solver" => ["test_c.jl"]])
     @test length(universe(root)) == 2                      # discovery: no guard needed
     @test_throws ErrorException universe(root; dirs=["core/"])        # undeclared solver/
     @test_throws ErrorException universe(root; dirs=["core/", "gone/"])  # declared, missing

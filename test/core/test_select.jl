@@ -1,6 +1,6 @@
 using Test, TestShards
 
-function fixture()
+function select_fixture()
     root = mktempdir()
     mkpath(joinpath(root, "core"))
     for f in ("test_a.jl", "test_b.jl", "test_c.jl")
@@ -10,7 +10,7 @@ function fixture()
 end
 
 @testset "selection precedence: FILES > SHARD > everything" begin
-    u = fixture()
+    u = select_fixture()
     files, desc, one = select(u; env=Dict("TESTSHARDS_FILES" => "core/test_b.jl"))
     @test [f for (_, f) in files] == ["test_b.jl"]
     @test occursin("FILES", desc)
@@ -25,21 +25,21 @@ end
 end
 
 @testset "a shard that would silently run EVERYTHING is an error" begin
-    u = fixture()
+    u = select_fixture()
     # The failure this prevents: a workflow wires the id but not the slice, every shard runs
     # the whole suite, CI is green, slow, and means nothing.
     @test_throws ErrorException select(u; env=Dict("TESTSHARDS_ID" => "s1"))
 end
 
 @testset "planner/suite disagreement is an error, not a silent skip" begin
-    u = fixture()
+    u = select_fixture()
     @test_throws ErrorException select(
         u; env=Dict("TESTSHARDS_FILES" => "core/test_gone.jl")
     )
 end
 
 @testset "malformed k/N is rejected" begin
-    u = fixture()
+    u = select_fixture()
     for bad in ("1", "x/3", "0/3", "4/3", "1/9")          # 1/9 exceeds the 3-file suite
         @test_throws ErrorException select(u; env=Dict("TESTSHARDS_SHARD" => bad))
     end

@@ -1,6 +1,6 @@
 using Test, TestShards
 
-function fixture(n; dir="core")
+function plan_fixture(n; dir="core")
     root = mktempdir()
     mkpath(joinpath(root, dir))
     for i in 1:n
@@ -10,7 +10,7 @@ function fixture(n; dir="core")
 end
 
 @testset "every shard is a subset and their union is the whole suite" begin
-    u = fixture(9)
+    u = plan_fixture(9)
     for n in 1:12
         shards = TestShards.plan(u, n)
         all_files = reduce(vcat, s.files for s in shards)
@@ -23,7 +23,7 @@ end
 end
 
 @testset "LPT balances against history; round-robin without it" begin
-    u = fixture(4)
+    u = plan_fixture(4)
     k = [filekey(d, f) for (d, f) in u.files]
 
     # 10 / 1 / 1 / 1 over two shards: the only balanced answer isolates the heavy file.
@@ -42,7 +42,7 @@ end
 end
 
 @testset "an unknown file is estimated pessimistically (P90), not optimistically" begin
-    u = fixture(4)
+    u = plan_fixture(4)
     k = [filekey(d, f) for (d, f) in u.files]
     t = Dict(k[1] => 1.0, k[2] => 1.0, k[3] => 100.0)     # k[4] has no history
     shards = TestShards.plan(u, 2; timings=t)
@@ -52,7 +52,7 @@ end
 end
 
 @testset "plan_json is a GitHub matrix, and only that on stdout" begin
-    u = fixture(3)
+    u = plan_fixture(3)
     j = plan_json(u, 2)
     @test startswith(j, "[{") && endswith(j, "}]")
     @test occursin("\"sid\":\"s1\"", j)
