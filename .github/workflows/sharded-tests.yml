@@ -64,7 +64,8 @@ on:
       fixed-cost-seconds:
         description: >
           Per-shard cost that does not shrink with more shards (checkout, depot restore,
-          precompile). Measure it as a shard job''s wall clock minus the time its units took.
+          precompile). Leave at 0: the shards now report their own windows and the diagnosis
+          MEASURES it. Set it only to ask what a hypothetical price would do to the curve.
           Only scales the reported cost; the knee is the same either way.
         type: string
         default: '0'
@@ -109,6 +110,13 @@ jobs:
       matrix:
         sid: ${{ fromJSON(needs.labels.outputs.matrix) }}
     steps:
+      # FIRST, before the checkout. Julia cannot see the checkout, the depot restore or the
+      # precompilation that precede it, and those are most of what a shard pays — so a shard
+      # window measured from inside the process would report a fixed cost several times too
+      # small. Everything after this line is inside the window.
+      - name: Mark when this shard's job started
+        run: echo "TESTSHARDS_JOB_START=$(date +%s)" >> "$GITHUB_ENV"
+
       - uses: actions/checkout@v7
 
       - name: Fetch the timing history (best-effort)
@@ -264,6 +272,9 @@ jobs:
           set -euo pipefail
           find parts -name 'timings-*.tsv'  -exec cat {} + | sort -u > all-timings.tsv  || : > all-timings.tsv
           find parts -name 'sections-*.tsv' -exec cat {} + | sort -u > all-sections.tsv || : > all-sections.tsv
+          # One row per shard: when it ran, not how long its units took. This is what turns
+          # "the split should give 3.2x" into what the run actually delivered.
+          find parts -name 'shard-*.tsv'    -exec cat {} + | sort -u > all-shards.tsv   || : > all-shards.tsv
           [ -s all-timings.tsv ] || { echo "No timings yet — nothing to diagnose."; exit 0; }
           julia --startup-file=no --project=/dev/null -e '
             using Pkg
@@ -271,7 +282,7 @@ jobs:
             Pkg.add(; eval(Meta.parse("(" * ENV["SPEC"] * ",)"))...)
             using TestShards
             exit(TestShards.diagnose_cli([
-                "all-timings.tsv", "all-sections.tsv",
+                "all-timings.tsv", "all-sections.tsv", "all-shards.tsv",
                 "--shards", ENV["SHARDS"], "--fixed", ENV["FIXED"],
             ]))' >> "$GITHUB_STEP_SUMMARY"
 

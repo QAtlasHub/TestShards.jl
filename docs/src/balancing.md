@@ -37,18 +37,22 @@ julia> using TestShards
 
 julia> t = TestShards.load_timings("timings.tsv");
 
-julia> TestShards.diagnose(t; n = 8, fixed = 60.0)
-TestShards diagnosis — 11 units
+julia> w = TestShards.load_shards("shards.tsv");
+
+julia> TestShards.diagnose(t; n = 8, shards = w)
+TestShards diagnosis — 12 units
   serial total      152.1s
-  fixed per shard   60.0s
-  at N=8            106.8s wall, 632.1s runner
+  fixed per shard   48.7s
+  predicted at N=8  95.5s wall, 542.0s runner
   knee              N=4  (N=8 costs more for no gain)
   floor             core/test_partition_large.jl  46.8s — no split finishes sooner than this
+  observed          201.0s wall, 542.0s runner over 8 shards
+  effective         0.8x of 8 — start window 130.0s (s1 first, s4 last)
 
   heaviest units
     46.8    core/test_partition_large.jl
-    35.1    core/test_unit_atomicity.jl
-    26.9    core/test_partition_small.jl
+    34.4    core/test_unit_atomicity.jl
+    25.1    core/test_partition_small.jl
 ```
 
 - **knee** — the smallest shard count that reaches the best wall clock. Past it you are paying
@@ -59,17 +63,86 @@ TestShards diagnosis — 11 units
 To lower the floor, split that unit. The diagnosis names the heaviest `@testset`s inside it, so
 you know where to cut rather than guessing.
 
+## Did the shards actually run at the same time?
+
+Everything above assumes they did. A shard count only buys parallelism if the runners are
+available; when the queue is congested the run finishes at
+
+> `(when the LAST shard starts) + (its share of the work)`
+
+and no amount of balancing changes that. So each shard also records **when** it ran, not only
+for how long, and the diagnosis reports the two numbers that make the difference visible:
+
+- **start window** — how long after the first shard the last one started.
+- **effective parallelism** — the work divided by the wall clock it took. This is what the
+  shard count was actually worth.
+
+The run above is this package's own: 8 shards, and an effective parallelism of **0.8**. The
+split was fine — the model says 95.5 s — but the last shard started 130 s after the first, so
+the run took 201 s. A run whose observed wall clock is far above the prediction says so
+explicitly in the CI summary, because the fix is a different one: fewer shards, or a runner
+pool that can actually start them together, not a better balance.
+
+Effective parallelism below 1 does not quite mean "one job would have been faster", though it
+is a strong hint. The per-unit seconds are measured in separate processes, each re-paying
+first-use compilation, so their sum overstates what a single job would take. Compare against a
+real unsharded run before concluding.
+
+Start times come from each runner's own clock. They are NTP-synced, so treat a spread of a
+second or two as noise rather than as a queue effect.
+
 ## Measuring `fixed`
 
 Take one shard's job wall clock and subtract the time its units took; the remainder is the
-fixed cost. It is usually dominated by precompilation.
+fixed cost. **The shards report this themselves** — the window each one recorded is exactly
+that subtraction — so `diagnose` measures `fixed` rather than guessing it, and the
+`fixed-cost-seconds` workflow input can stay at `0`. Set it only to ask what a hypothetical
+price would do to the curve; an explicit value wins over the measured one.
 
-`fixed` scales the reported cost but not the knee, so leaving it at `0` still answers "how many
-shards can this suite use". Pass it via the `fixed-cost-seconds` workflow input to get the
-runner-time figures right too.
+The window ends when the test process does, so per-shard work that happens *after* the tests —
+processing coverage, uploading artefacts — falls outside it. The measured `fixed` is a lower
+bound on what a shard really costs.
+
+`fixed` scales the reported cost but not the knee, so an unmeasured run still answers "how many
+shards can this suite use".
+
+## What is actually limiting this suite
+
+The numbers above support four different conclusions, and they want opposite actions. Rather
+than leave the reader to pick, the diagnosis decides — [`TestShards.bottleneck`](@ref) returns
+one of four types and [`TestShards.remedy`](@ref) and [`TestShards.usable_shards`](@ref)
+dispatch on it:
+
+| regime | what it means | what to do |
+|---|---|---|
+| [`QueueBound`](@ref TestShards.QueueBound) | the shards never overlapped | fewer shards, or a pool that can start them |
+| [`FixedCostBound`](@ref TestShards.FixedCostBound) | a shard spends longer getting ready than testing | lower the setup, or split less |
+| [`FloorBound`](@ref TestShards.FloorBound) | the heaviest single unit is what is left | cut that unit in two |
+| [`WorkBound`](@ref TestShards.WorkBound) | nothing is in the way | more shards would still help |
+
+They are tested in that order, because fixing one is what exposes the next: a queue-bound run
+says nothing about its own balance, since the balance was never given a chance to matter.
+
+This is a type rather than a paragraph because **the same numbers mean opposite things at
+different scales**. A 49 s per-shard cost and a 130 s start window are fatal to a 150 s suite
+and a rounding error on a 40-minute one. Deciding which case you are in is a fact about your
+repository, and every consumer working it out again by hand is how the wrong one gets acted on.
 
 ## Sharing the depot cache
 
-All shards instantiate the same project, so they should share one dependency cache. The bundled
-workflow does this. Giving each shard its own cache key makes it pay precompilation separately
-— which is exactly the `fixed` term above, multiplied by the shard count.
+All shards instantiate the same project, so they should share one dependency cache, and the
+bundled workflow does this: one `cache-name` for the whole matrix, `include-matrix: false`.
+A shard that starts after another has finished then restores that shard's depot instead of
+building its own, and only one copy is stored per run instead of one per shard.
+
+How much that is worth depends entirely on the dependency tree, and the two ends look nothing
+alike. Measured on *this* package — one dependency — precompilation is 3–4 s of a ~49 s fixed
+cost, so the cache is nearly free and nearly pointless; what is left is installing Julia,
+processing coverage and starting a `Pkg.test` sandbox, none of which a depot cache touches. On a
+suite with a real dependency tree it is the other way round: precompilation dominates the fixed
+cost, and sharing the cache is the difference between paying it once and paying it once per
+shard.
+
+Which of the two you are in is a fact about your repository, not about sharding, and it is
+exactly what the measured `fixed` above tells you. Read it before deciding anything costs too
+much.
