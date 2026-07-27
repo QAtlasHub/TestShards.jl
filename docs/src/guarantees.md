@@ -29,6 +29,56 @@ which is the point of running it anyway, at no cost. Under
 that starts late takes less work instead of delaying everyone. It is worth it exactly when the
 diagnosis says [`QueueBound`](@ref TestShards.QueueBound).
 
+### How much it is worth, and when it is not
+
+Under assignment the run cannot finish before the last shard to *start* has also done its share:
+
+> `wall ≈ last_start + fixed + serial/N`
+
+Under claiming that shard finds nothing left and does none of it:
+
+> `wall ≈ max(when the early shards absorb everything, last_start + fixed)`
+
+So **what stealing removes from the critical path is one share, `serial/N`** — and no more,
+however many shards arrived late, because the wall clock is set by whichever finishes last
+either way.
+
+Whether that is worth having is decided by one ratio, `share / fixed`, and **the diagnosis
+already computes it**: [`FixedCostBound`](@ref TestShards.FixedCostBound) is exactly the case
+where the fixed cost exceeds the heaviest bin, which is to say `share < fixed`.
+
+- **Work-dominated (`share > fixed`)** — a late shard's share is the largest single item on the
+  critical path, and stealing removes it. A shard that claims nothing costs `fixed` instead of
+  `fixed + share`, so it finishes well before the working ones and never sets the wall clock.
+- **Setup-dominated ([`FixedCostBound`](@ref TestShards.FixedCostBound))** — the shards that
+  claim nothing still pay for checkout, Julia, the depot and coverage, and that is *more* than
+  the work stealing saved. They can finish last while having run nothing at all.
+
+Measured, two suites in the same organisation:
+
+| | `serial/N` | fixed | ratio |
+|---|--:|--:|--:|
+| this package, N=8 | 27 s | 49 s | **0.55** — setup-dominated |
+| QAtlas.jl, N=16 | 255–651 s | 225–271 s | **1.1–2.6** — work-dominated |
+
+Note what that table does *not* say. It is tempting to conclude that a larger shard count makes
+stealing worth less, since `serial/N` shrinks as `N` grows — but QAtlas runs **twice** the shard
+count and is still work-dominated by a wide margin. `N` only matters through the share it
+produces; what decides the question is that share against the fixed cost, and a big suite split
+sixteen ways still has more work per shard than a small one split eight ways.
+
+So: **steal when a run is [`QueueBound`](@ref TestShards.QueueBound) and the suite is not
+[`FixedCostBound`](@ref TestShards.FixedCostBound).** This package's own suite is the second
+kind, which is why stealing does not help it — and why measuring it here says nothing about
+whether it helps yours.
+
+One measurement to trust more than the others: a shard that claims nothing spends its whole
+life on setup, so **its wall clock *is* the fixed cost**, with nothing to subtract. In a run
+here with a 119 s start window, four shards ran zero units and reported 46–75 s, against the
+24.7 s the in-process windows report. That is the understatement of #16, confirmed from the
+other side — and it is worst on small suites, where the trailing coverage step the window
+misses is half the fixed cost rather than a tenth of it.
+
 It also gives up the theorem. A shard that claims a unit and is then cancelled, OOM-killed or
 disconnected leaves that unit claimed and never run, and the merged records are simply short by
 one. **That is why the completeness check is not optional and not conditional** — with claiming
