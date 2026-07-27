@@ -568,8 +568,266 @@ function write_records(ctx::ShardContext, dir::AbstractString)
             println(io, r.key, '\t', round(r.duration; digits=3))
         end
     end
+    # A flat view of the same tree, `unit <TAB> section path <TAB> seconds`. The planner never
+    # reads this — it exists so [`diagnose`](@ref) can say WHERE inside a heavy unit to cut,
+    # without anything downstream having to parse JSON.
+    open(joinpath(dir, "sections-$(tag).tsv"), "w") do io
+        for r in ctx.records
+            _write_sections(io, r.key, "", r.sections)
+        end
+    end
     println("TestShards: wrote $(length(ctx.records)) records → $dir")
     return nothing
+end
+
+function _write_sections(io, key, prefix, sections)
+    for s in sections
+        path = isempty(prefix) ? s.name : string(prefix, " / ", s.name)
+        println(io, key, '\t', path, '\t', round(s.duration; digits=3))
+        _write_sections(io, key, path, s.sections)
+    end
+    return nothing
+end
+
+# ─────────────────────────────────────────────────────────────────────────────────────
+# Diagnosis — read the history back and say where the suite is badly shaped
+# ─────────────────────────────────────────────────────────────────────────────────────
+
+"""
+    load_sections(path) -> Dict{String,Vector{Pair{String,Float64}}}
+
+Read a `sections-*.tsv` (`unit <TAB> section path <TAB> seconds`) into per-unit section lists.
+Malformed rows are ignored, like [`load_timings`](@ref): a diagnosis must never be the thing
+that fails a run.
+"""
+function load_sections(path::AbstractString)
+    d = Dict{String,Vector{Pair{String,Float64}}}()
+    (isempty(path) || !isfile(path)) && return d
+    for ln in eachline(path)
+        parts = split(rstrip(ln, ['\n', '\r']), '\t')
+        length(parts) == 3 || continue
+        v = tryparse(Float64, parts[3])
+        v === nothing && continue
+        push!(get!(d, String(parts[1]), Pair{String,Float64}[]), String(parts[2]) => v)
+    end
+    return d
+end
+
+"""
+    Diagnosis
+
+What the timing history says about the shape of the suite, rather than about any one run.
+
+`walls` is the predicted wall clock per shard count under the model `wall(N) = fixed +
+max_bin(N)`: a shard pays a fixed cost (checkout, depot restore, precompile) that does not
+shrink when you add shards, plus the load of its heaviest bin. `knee` is the smallest `N` at
+which `walls` stops improving — past it, more shards buy nothing and cost a fixed price each.
+
+The floor is the single heaviest unit: no split of the suite across jobs can finish sooner
+than that, so `floor_unit` is the only place where more parallelism can come from.
+"""
+struct Diagnosis
+    n::Int
+    fixed::Float64
+    serial::Float64
+    critical_path::Float64
+    knee::Int
+    floor_unit::String
+    floor_time::Float64
+    units::Vector{Pair{String,Float64}}          # heaviest first
+    walls::Vector{Pair{Int,Float64}}
+    split_here::Vector{Pair{String,Float64}}     # sections of the floor unit, heaviest first
+end
+
+"Load of the heaviest bin when LPT-packing `timings` into `n` shards."
+function _max_bin(timings::AbstractDict, n::Integer)
+    isempty(timings) && return 0.0
+    loads = zeros(Float64, n)
+    for k in sort(collect(keys(timings)); by=k -> (-timings[k], k))
+        loads[argmin(loads)] += timings[k]
+    end
+    return maximum(loads)
+end
+
+"""
+    diagnose(timings; n = 8, fixed = 0.0, sections = Dict()) -> Diagnosis
+
+Answer three questions the raw numbers do not: how many shards this suite can actually use,
+what is stopping it from using more, and where to cut to move that limit.
+
+`fixed` is the per-shard cost that does not shrink with more shards. Measure it as a shard's
+job wall clock minus the time its units took; it is usually dominated by precompilation, and
+it is what makes over-sharding expensive rather than merely useless.
+"""
+function diagnose(
+    timings::AbstractDict;
+    n::Integer=8,
+    fixed::Real=0.0,
+    sections::AbstractDict=Dict{String,Vector{Pair{String,Float64}}}(),
+)
+    isempty(timings) &&
+        throw(ArgumentError("TestShards.diagnose: the timing history is empty"))
+    units = sort([String(k) => Float64(v) for (k, v) in timings]; by=last, rev=true)
+    serial = sum(last, units)
+    floor_unit, floor_time = first(units)
+
+    walls = [
+        i => Float64(fixed) + _max_bin(timings, i) for i in 1:max(n, 2 * length(units))
+    ]
+    # The knee is where the curve flattens: the first N whose wall is within 1% of the best
+    # achievable. Anything past it pays another `fixed` for no reduction in wall clock.
+    best = minimum(last, walls)
+    knee = first(first(filter(p -> last(p) <= best * 1.01, walls)))
+
+    secs = sort(get(sections, floor_unit, Pair{String,Float64}[]); by=last, rev=true)
+    return Diagnosis(
+        Int(n),
+        Float64(fixed),
+        serial,
+        Float64(fixed) + _max_bin(timings, n),
+        knee,
+        floor_unit,
+        floor_time,
+        units,
+        walls,
+        secs,
+    )
+end
+
+function Base.show(io::IO, ::MIME"text/plain", d::Diagnosis)
+    println(io, "TestShards diagnosis — ", length(d.units), " units")
+    println(io, "  serial total      ", round(d.serial; digits=1), "s")
+    d.fixed > 0 && println(io, "  fixed per shard   ", round(d.fixed; digits=1), "s")
+    println(
+        io,
+        "  at N=",
+        d.n,
+        "           ",
+        round(d.critical_path; digits=1),
+        "s wall, ",
+        round(d.n * d.fixed + d.serial; digits=1),
+        "s runner",
+    )
+    println(
+        io,
+        "  knee              N=",
+        d.knee,
+        d.knee < d.n ? "  (N=$(d.n) costs more for no gain)" : "",
+    )
+    println(
+        io,
+        "  floor             ",
+        d.floor_unit,
+        "  ",
+        round(d.floor_time; digits=1),
+        "s — no split finishes sooner than this",
+    )
+    println(io, "\n  heaviest units")
+    for (k, v) in first(d.units, min(5, length(d.units)))
+        println(io, "    ", rpad(round(v; digits=1), 8), k)
+    end
+    if !isempty(d.split_here)
+        println(io, "\n  inside ", d.floor_unit, " — split at the heaviest section")
+        for (name, v) in first(d.split_here, min(4, length(d.split_here)))
+            println(io, "    ", rpad(round(v; digits=1), 8), name)
+        end
+    end
+    return nothing
+end
+
+"""
+    diagnose_report(d) -> String
+
+The diagnosis as Markdown, for a CI job summary.
+"""
+function diagnose_report(d::Diagnosis)
+    io = IOBuffer()
+    println(io, "### Shard diagnosis\n")
+    println(io, "| | |\n|---|--:|")
+    println(io, "| units | ", length(d.units), " |")
+    println(io, "| serial total | ", round(d.serial; digits=1), "s |")
+    d.fixed > 0 && println(io, "| fixed cost per shard | ", round(d.fixed; digits=1), "s |")
+    println(io, "| wall at N=", d.n, " | ", round(d.critical_path; digits=1), "s |")
+    println(io, "| knee | N=", d.knee, " |")
+    println(
+        io, "| floor unit | `", d.floor_unit, "` (", round(d.floor_time; digits=1), "s) |"
+    )
+    if d.knee < d.n
+        println(
+            io,
+            "\n> `shards: ",
+            d.n,
+            "` is past the knee. `shards: ",
+            d.knee,
+            "` finishes at the same wall clock and starts ",
+            d.n - d.knee,
+            " fewer jobs.",
+        )
+    end
+    println(io, "\n<details><summary>Heaviest units</summary>\n")
+    println(io, "| unit | seconds | share |\n|---|--:|--:|")
+    for (k, v) in first(d.units, min(10, length(d.units)))
+        println(
+            io,
+            "| `",
+            k,
+            "` | ",
+            round(v; digits=1),
+            " | ",
+            round(100 * v / d.serial; digits=1),
+            "% |",
+        )
+    end
+    if !isempty(d.split_here)
+        println(io, "\n**Split `", d.floor_unit, "` here to lower the floor:**\n")
+        println(io, "| section | seconds |\n|---|--:|")
+        for (name, v) in first(d.split_here, min(6, length(d.split_here)))
+            println(io, "| ", name, " | ", round(v; digits=1), " |")
+        end
+    end
+    println(io, "\n</details>")
+    return String(take!(io))
+end
+
+"""
+    diagnose_cli(args = ARGS) -> Int
+
+`timings.tsv [sections.tsv] [--shards N] [--fixed SECONDS]`, printing the Markdown report.
+Used by the CI collect step so every run says where the suite is badly shaped.
+"""
+function diagnose_cli(args=ARGS)
+    files = String[]
+    n, fixed = 8, 0.0
+    i = 1
+    while i <= length(args)
+        a = args[i]
+        if a == "--shards" && i < length(args)
+            n = something(tryparse(Int, args[i + 1]), 8)
+            i += 2
+        elseif a == "--fixed" && i < length(args)
+            fixed = something(tryparse(Float64, args[i + 1]), 0.0)
+            i += 2
+        else
+            push!(files, a)
+            i += 1
+        end
+    end
+    isempty(files) && (
+        println(stderr, "usage: timings.tsv [sections.tsv] [--shards N] [--fixed S]");
+        return 1
+    )
+    timings = load_timings(files[1])
+    if isempty(timings)
+        println(stderr, "TestShards: no timing history yet — nothing to diagnose.")
+        return 0
+    end
+    sections = if length(files) > 1
+        load_sections(files[2])
+    else
+        Dict{String,Vector{Pair{String,Float64}}}()
+    end
+    print(diagnose_report(diagnose(timings; n, fixed, sections)))
+    return 0
 end
 
 """
