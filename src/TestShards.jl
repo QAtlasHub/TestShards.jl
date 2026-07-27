@@ -586,6 +586,14 @@ end
 # ─────────────────────────────────────────────────────────────────────────────────────
 
 function _begin(root::AbstractString; env=ENV)
+    # Installing a second context would replace the first one's, and the first block would then
+    # fail on its next `include` with "not inside a @shard block" — a long way from the cause.
+    # `@shard` blocks do not nest, and the way this happens in practice is a test that wants a
+    # context and reaches for `_begin` to get one, inside the suite the driver is running.
+    CURRENT[] === nothing || error(
+        "TestShards: a @shard block is already running. Blocks do not nest, and a second " *
+        "`_begin` would silently take the first one's place.",
+    )
     units_spec = get(env, ENV_UNITS, "")
     units = if isempty(units_spec)
         nothing

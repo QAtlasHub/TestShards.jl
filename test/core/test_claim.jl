@@ -58,16 +58,41 @@ end
     @test own2.min_seconds == 2.5
 end
 
+"""
+A context built by hand, touching no globals.
+
+`_begin` is the obvious way to get one and is the wrong way: it installs the context in
+`TestShards.CURRENT`, so calling it from inside a `@shard` block — which is where this suite
+runs — replaces that block's own context with a fixture, and every later `include` dies with
+"not inside a @shard block". The driver under test is the driver running the test.
+"""
+function bare_context(;
+    shard="s1", nshards=2, ownership=TestShards.Assigned(), timings=Dict{String,Float64}()
+)
+    return TestShards.ShardContext(
+        mktempdir(),
+        shard,
+        nothing,
+        nshards,
+        Dict{String,String}(),
+        0,
+        0,
+        0,
+        time(),
+        ownership,
+        timings,
+        Tuple{Int,String}[],
+        TestShards.UnitRecord[],
+        IdDict{Any,Dict{String,Any}}(),
+    )
+end
+
 @testset "a cheap unit is not worth a round trip, so it stays assigned" begin
     # Below the threshold the claim is skipped entirely — no request is made, which is what
     # makes this safe to leave on for a thousand-unit suite. `api` points nowhere on purpose:
     # if the threshold failed to apply, the request would be attempted and this would throw.
     c = TestShards.Claimed("http://127.0.0.1:1", "o/r", "ns", "sha", "tok", 10.0, 1)
-    ctx = TestShards._begin(
-        mktempdir(); env=Dict("TESTSHARDS_ID" => "s1", "TESTSHARDS_N" => "2")
-    )
-    ctx.ownership = c
-    ctx.timings = Dict("cheap.jl" => 0.4, "dear.jl" => 40.0)
+    ctx = bare_context(; ownership=c, timings=Dict("cheap.jl" => 0.4, "dear.jl" => 40.0))
 
     # Round-robin over the two shards: the first cheap unit falls to s1, the next to s2.
     @test TestShards._owns(ctx, "cheap.jl", 1)          # assigned, not claimed
@@ -75,7 +100,13 @@ end
     # The expensive one WOULD be claimed, and the endpoint is unreachable, so it raises rather
     # than guessing an answer.
     @test_throws ErrorException TestShards._owns(ctx, "dear.jl", 3)
-    TestShards.CURRENT[] = nothing
+
+    # And nothing above disturbed the @shard block this test is itself running inside.
+    @test TestShards.current() !== nothing
+    # Which is now enforced rather than trusted: reaching for `_begin` from in here — the
+    # mistake that produced this helper — says so instead of breaking the next include.
+    @test_throws ErrorException TestShards._begin(mktempdir(); env=Dict{String,String}())
+    @test TestShards.current() !== nothing
 end
 
 @testset "an unreachable claim endpoint stops the shard instead of guessing" begin
