@@ -94,7 +94,7 @@ jobs:
       matrix:
         sid: ${{ fromJSON(needs.labels.outputs.matrix) }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Fetch the timing history (best-effort)
         run: |
@@ -228,7 +228,7 @@ jobs:
     permissions:
       contents: write                   # force-pushes the ci-timings orphan branch
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
         with:
           path: parts
