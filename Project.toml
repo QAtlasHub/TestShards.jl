@@ -1,13 +1,15 @@
 name = "TestShards"
 uuid = "acceef1d-f5e0-4fe4-a546-818dc56ce7b2"
-version = "0.2.4"
+version = "0.3.0"
 authors = ["sota shimozono <shimozono-sota631@g.ecc.u-tokyo.ac.jp>"]
 
 [deps]
+Downloads = "f43a241f-c20a-4ad4-852c-f6b1247861c6"
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 
 [compat]
 Aqua = "0.8"
+Downloads = "1"
 Test = "1"
 julia = "1.10"
 
