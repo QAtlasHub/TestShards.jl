@@ -248,7 +248,7 @@ jobs:
       # What the numbers mean, rather than what they are: how many shards this suite can
       # actually use, what is stopping it using more, and which section of the heaviest unit
       # to cut. Best-effort — a diagnosis must never be the thing that fails a run.
-      - uses: julia-actions/setup-julia@v2
+      - uses: julia-actions/setup-julia@v3
         if: ${{ inputs.diagnose }}
         continue-on-error: true
         with:
