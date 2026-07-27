@@ -12,6 +12,38 @@ is therefore a total, deterministic function of that sequence, computed identica
 - a unit no shard claims **cannot exist**;
 - a unit with no timing history is still assigned, so adding a test file cannot leave it unrun.
 
+## …and every run proves it
+
+The paragraph above is an argument. Each run also *checks* it: every shard reports how many
+units it observed and which positions it took, and the collect job reconciles them with
+[`TestShards.completeness`](@ref). The run fails if a unit ran nowhere, if a unit ran twice, or
+if two shards disagreed about how many units the suite has.
+
+Under the default [`Assigned`](@ref TestShards.Assigned) ownership that check can only pass —
+which is the point of running it anyway, at no cost. Under
+[`Claimed`](@ref TestShards.Claimed) it is load-bearing: see below.
+
+## Work stealing, and the guarantee it gives up
+
+`steal: true` replaces assignment with a claim — a shard runs whatever nobody has taken, so one
+that starts late takes less work instead of delaying everyone. It is worth it exactly when the
+diagnosis says [`QueueBound`](@ref TestShards.QueueBound).
+
+It also gives up the theorem. A shard that claims a unit and is then cancelled, OOM-killed or
+disconnected leaves that unit claimed and never run, and the merged records are simply short by
+one. **That is why the completeness check is not optional and not conditional** — with claiming
+on, it is the only thing between a dead runner and a green run that never tested part of the
+suite.
+
+Three further things stay loud rather than convenient:
+
+- a shard asked to claim without the token, repository or sha to do it **errors**; falling back
+  to assignment would run the suite with the strategy you did not ask for and report success;
+- a claim request that neither succeeds nor is refused — a network failure — **errors** after
+  retrying, because both available guesses are wrong: one drops a unit, the other runs it twice;
+- the claim namespace includes the run id and attempt, so a re-run cannot inherit the previous
+  attempt's claims and skip everything.
+
 ## What is an error rather than a warning
 
 | situation | why it must be loud |

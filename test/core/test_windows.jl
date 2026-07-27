@@ -38,10 +38,10 @@ end
     f = joinpath(dir, "shards.tsv")
     write(
         f,
-        "s1\t100.0\t160.0\t2\t40.0\n" *
-        "s2\tnot-a-number\t160.0\t1\t10.0\n" *   # unparseable
+        "s1\t100.0\t160.0\t2\t40.0\t3\n" *
+        "s2\tnot-a-number\t160.0\t1\t10.0\t3\n" *   # unparseable
         "s3\t100.0\t160.0\n" *                   # too few columns
-        "s4\t120.0\t200.0\t1\t50.0\n",
+        "s4\t120.0\t200.0\t1\t50.0\t3\n",
     )
     ws = TestShards.load_shards(f)
     @test [w.shard for w in ws] == ["s1", "s4"]
@@ -52,8 +52,8 @@ end
     # Two shards, perfectly overlapping: 40s of units each in a 60s window, so 80s of work in
     # 60s of wall clock.
     together = [
-        TestShards.ShardWindow("s1", 100.0, 160.0, 2, 40.0),
-        TestShards.ShardWindow("s2", 100.0, 160.0, 2, 40.0),
+        TestShards.ShardWindow("s1", 100.0, 160.0, 2, 40.0, 4),
+        TestShards.ShardWindow("s2", 100.0, 160.0, 2, 40.0, 4),
     ]
     o = TestShards.observe(together)
     @test o.wall ≈ 60.0
@@ -65,8 +65,8 @@ end
     # The same two shards, one starting after the other has finished. Identical work, identical
     # split, identical per-unit timings — and half the parallelism.
     apart = [
-        TestShards.ShardWindow("s1", 100.0, 160.0, 2, 40.0),
-        TestShards.ShardWindow("s2", 160.0, 220.0, 2, 40.0),
+        TestShards.ShardWindow("s1", 100.0, 160.0, 2, 40.0, 4),
+        TestShards.ShardWindow("s2", 160.0, 220.0, 2, 40.0, 4),
     ]
     p = TestShards.observe(apart)
     @test p.wall ≈ 120.0
@@ -83,8 +83,8 @@ end
 @testset "the diagnosis measures the fixed cost instead of guessing it" begin
     t = Dict("heavy" => 40.0, "a" => 5.0)
     ws = [
-        TestShards.ShardWindow("s1", 0.0, 60.0, 1, 40.0),     # 20s fixed
-        TestShards.ShardWindow("s2", 0.0, 25.0, 1, 5.0),      # 20s fixed
+        TestShards.ShardWindow("s1", 0.0, 60.0, 1, 40.0, 2),     # 20s fixed
+        TestShards.ShardWindow("s2", 0.0, 25.0, 1, 5.0, 2),      # 20s fixed
     ]
     d = TestShards.diagnose(t; n=2, shards=ws)
     @test d.fixed ≈ 20.0                  # measured, not passed in
@@ -101,15 +101,15 @@ end
 @testset "peak concurrency counts the runners actually granted" begin
     # Eight shards requested, two ever alive at once.
     serialised = [
-        TestShards.ShardWindow("s$i", 10.0 * i, 10.0 * i + 15, 1, 5.0) for i in 1:8
+        TestShards.ShardWindow("s$i", 10.0 * i, 10.0 * i + 15, 1, 5.0, 8) for i in 1:8
     ]
     @test TestShards.peak_concurrency(serialised) == 2
-    together = [TestShards.ShardWindow("s$i", 0.0, 60.0, 1, 40.0) for i in 1:8]
+    together = [TestShards.ShardWindow("s$i", 0.0, 60.0, 1, 40.0, 8) for i in 1:8]
     @test TestShards.peak_concurrency(together) == 8
     # A shard that finishes exactly when the next begins never overlapped it.
     @test TestShards.peak_concurrency([
-        TestShards.ShardWindow("s1", 0.0, 60.0, 1, 40.0),
-        TestShards.ShardWindow("s2", 60.0, 120.0, 1, 40.0),
+        TestShards.ShardWindow("s1", 0.0, 60.0, 1, 40.0, 2),
+        TestShards.ShardWindow("s2", 60.0, 120.0, 1, 40.0, 2),
     ]) == 1
     @test TestShards.peak_concurrency(TestShards.ShardWindow[]) == 0
 end
@@ -134,8 +134,8 @@ end
     # And the same suite again, this time measured, with the shards not overlapping. Identical
     # timings, identical split — a different regime, because of when the jobs ran.
     late = [
-        TestShards.ShardWindow("s1", 0.0, 60.0, 1, 40.0),
-        TestShards.ShardWindow("s2", 300.0, 325.0, 2, 10.0),
+        TestShards.ShardWindow("s1", 0.0, 60.0, 1, 40.0, 2),
+        TestShards.ShardWindow("s2", 300.0, 325.0, 2, 10.0, 3),
     ]
     queued = TestShards.diagnose(heavy; n=2, shards=late)
     @test TestShards.bottleneck(queued) isa TestShards.QueueBound
@@ -167,8 +167,8 @@ end
     # Shards that overlap: observed wall clock is close to what the model predicts, so there is
     # nothing to warn about.
     ontime = [
-        TestShards.ShardWindow("s1", 0.0, 60.0, 1, 40.0),
-        TestShards.ShardWindow("s2", 0.0, 25.0, 1, 5.0),
+        TestShards.ShardWindow("s1", 0.0, 60.0, 1, 40.0, 2),
+        TestShards.ShardWindow("s2", 0.0, 25.0, 1, 5.0, 2),
     ]
     md = TestShards.diagnose_report(TestShards.diagnose(t; n=2, shards=ontime))
     @test occursin("observed wall", md)
@@ -179,8 +179,8 @@ end
 
     # The same work, one shard starting 300s late.
     late = [
-        TestShards.ShardWindow("s1", 0.0, 60.0, 1, 40.0),
-        TestShards.ShardWindow("s2", 300.0, 325.0, 1, 5.0),
+        TestShards.ShardWindow("s1", 0.0, 60.0, 1, 40.0, 2),
+        TestShards.ShardWindow("s2", 300.0, 325.0, 1, 5.0, 2),
     ]
     md2 = TestShards.diagnose_report(TestShards.diagnose(t; n=2, shards=late))
     @test occursin("did not overlap", md2)
@@ -200,7 +200,7 @@ end
     shards = joinpath(dir, "w.tsv")
     write(tsv, "heavy\t40\na\t5\n")
     write(secs, "heavy\touter\t39\n")
-    write(shards, "s1\t0.0\t60.0\t1\t40.0\ns2\t300.0\t325.0\t1\t5.0\n")
+    write(shards, "s1\t0.0\t60.0\t1\t40.0\t2\ns2\t300.0\t325.0\t1\t5.0\t2\n")
     @test TestShards.diagnose_cli([tsv, secs, shards, "--shards", "2"]) == 0
     # Absent or unreadable windows degrade to the model-only report rather than failing.
     @test TestShards.diagnose_cli([tsv, secs, joinpath(dir, "absent.tsv")]) == 0

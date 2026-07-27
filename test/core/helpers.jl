@@ -52,7 +52,7 @@ end
 Run a suite in a SUBPROCESS. Inline would fold its results — including deliberate failures —
 into the suite doing the testing.
 """
-function run_suite(d; env=Dict{String,String}())
+function run_suite(d; env=Dict{String,String}(), keep_stderr=false)
     out = mktempdir()
     e = copy(ENV)
     # Strip the OUTER run's shard variables first. When this suite is itself sharded, the
@@ -66,7 +66,12 @@ function run_suite(d; env=Dict{String,String}())
     e["TESTSHARDS_OUT"] = out
     cmd = `$(Base.julia_cmd()) --startup-file=no --project=$PROJ $(joinpath(d, "runtests.jl"))`
     io = IOBuffer()
-    ok = success(pipeline(ignorestatus(setenv(cmd, e)); stdout=io, stderr=devnull))
+    # stderr is dropped by default — a deliberately failing fixture dumps a stacktrace and it
+    # is noise. Ask for it when the point of the test is WHY the run failed: asserting only
+    # that it failed passes for any reason at all, including the wrong one.
+    ok = success(
+        pipeline(ignorestatus(setenv(cmd, e)); stdout=io, stderr=keep_stderr ? io : devnull)
+    )
     return (ok, String(take!(io)), out)
 end
 

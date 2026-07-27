@@ -68,6 +68,8 @@ jobs:
 | `julia-version` | `'1'` | |
 | `test-root` | `'test'` | directory holding `runtests.jl` |
 | `coverage` | `true` | merge the shards' coverage and upload it |
+| `steal` | `false` | claim work instead of being assigned it — see [Guarantees](guarantees.md) |
+| `steal-min-seconds` | `0` | with `steal`, leave units cheaper than this statically assigned |
 | `diagnose` | `true` | report what the history says about the suite's shape |
 | `fixed-cost-seconds` | `'0'` | per-shard overhead, for the cost figures (see [Balancing](balancing.md)) |
 

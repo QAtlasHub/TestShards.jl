@@ -27,7 +27,9 @@ name: Sharded tests
 #             into one ordered document. This is the part otherwise hand-written per repo.
 #   timings   on the default branch only, fold the timings into the `ci-timings` orphan branch.
 #             A PR must never rewrite the history it was planned against.
-#   gate      one required-check-shaped job, green iff every shard was.
+#   gate      one required-check-shaped job, green iff every shard passed AND every unit ran
+#             exactly once. Those are different claims: a shard can pass having quietly run
+#             nothing, which is what `steal` makes possible and what `collect` checks.
 #
 # With no history the shards fall back to round-robin, so a fresh repo is correct from the
 # first run and balances itself from the second push onward.
@@ -61,6 +63,20 @@ on:
         description: 'Report what the timing history says about the shape of the suite.'
         type: boolean
         default: true
+      steal:
+        description: >
+          Claim work instead of being assigned it. Each shard runs whatever is still unclaimed,
+          so one that starts late takes less rather than delaying everyone. Worth it only when
+          the diagnosis says QueueBound: it costs a round trip per unit, and the completeness
+          gate below exists because a shard that dies after claiming leaves a hole.
+        type: boolean
+        default: false
+      steal-min-seconds:
+        description: >
+          Units cheaper than this stay statically assigned when stealing: below it a round trip
+          costs more than the unit does. Needs a timing history to know which those are.
+        type: string
+        default: '0'
       fixed-cost-seconds:
         description: >
           Per-shard cost that does not shrink with more shards (checkout, depot restore,
@@ -155,6 +171,15 @@ jobs:
           # `Pkg.test` sandboxes the suite, so the output directory must be pinned into the
           # workspace or the upload would look where the files never were.
           TESTSHARDS_OUT: ${{ github.workspace }}/${{ inputs.test-root }}/.ci-out
+          # Claiming, when asked for. The ref namespace is per RUN, so two runs of the same
+          # commit cannot claim each other's work. GITHUB_TOKEN already has `contents: write`
+          # from the caller — the same grant the timing history needs — so this adds no secret.
+          TESTSHARDS_CLAIM: ${{ inputs.steal && '1' || '' }}
+          TESTSHARDS_CLAIM_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TESTSHARDS_CLAIM_REPO: ${{ github.repository }}
+          TESTSHARDS_CLAIM_NS: tsclaim/${{ github.run_id }}/${{ github.run_attempt }}
+          TESTSHARDS_CLAIM_SHA: ${{ github.sha }}
+          TESTSHARDS_CLAIM_MIN: ${{ inputs.steal-min-seconds }}
 
       - uses: julia-actions/julia-processcoverage@v1
         if: ${{ inputs.coverage }}
@@ -248,6 +273,23 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: false
 
+      # NOT best-effort, and not conditional on `steal`. Under assignment this is a theorem —
+      # every shard computes the same total function, so a unit nobody runs cannot exist — and
+      # checking a theorem each run costs nothing while turning it from an argument into
+      # evidence. Under claiming it is the only thing standing between a runner dying mid-claim
+      # and a green run that quietly skipped part of the suite.
+      - name: Every unit ran, exactly once
+        run: |
+          set -euo pipefail
+          find parts -name 'shard-*.tsv' -exec cat {} + | sort -u > all-shards.tsv || : > all-shards.tsv
+          find parts -name 'ran-*.tsv'   -exec cat {} + | sort -u > all-ran.tsv    || : > all-ran.tsv
+          # tee, not redirect: when this fails it is a required check going red, and the
+          # reason has to be in the log people open first, not only in the run summary.
+          julia --startup-file=no --project="$RUNNER_TEMP/tsenv" -e '
+            using TestShards
+            exit(TestShards.completeness_cli(ARGS))' all-shards.tsv all-ran.tsv \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+
       - name: Merge every shard's records into one ordered document
         run: |
           set -euo pipefail
@@ -292,9 +334,7 @@ jobs:
           set -euo pipefail
           find parts -name 'timings-*.tsv'  -exec cat {} + | sort -u > all-timings.tsv  || : > all-timings.tsv
           find parts -name 'sections-*.tsv' -exec cat {} + | sort -u > all-sections.tsv || : > all-sections.tsv
-          # One row per shard: when it ran, not how long its units took. This is what turns
-          # "the split should give 3.2x" into what the run actually delivered.
-          find parts -name 'shard-*.tsv'    -exec cat {} + | sort -u > all-shards.tsv   || : > all-shards.tsv
+          # all-shards.tsv is already here: the completeness step above builds it.
           [ -s all-timings.tsv ] || { echo "No timings yet — nothing to diagnose."; exit 0; }
           julia --startup-file=no --project="$RUNNER_TEMP/tsenv" -e '
             using TestShards
@@ -357,9 +397,12 @@ jobs:
           git push -q --force \
             "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" ci-timings
 
+  # The one required-check-shaped job. It waits on `collect` as well as on the shards, because
+  # "every shard passed" and "every unit ran" are different claims and only the second one
+  # survives a shard dying after it claimed work.
   gate:
     name: All shards passed
-    needs: test
+    needs: [test, collect]
     if: always()
     runs-on: ${{ fromJSON(inputs.helper-runner) }}
     steps:
@@ -367,4 +410,7 @@ jobs:
           if [ "${{ needs.test.result }}" != "success" ]; then
             echo "::error::one or more shards failed (${{ needs.test.result }})"; exit 1
           fi
-          echo "All shards green."
+          if [ "${{ needs.collect.result }}" != "success" ]; then
+            echo "::error::the shards passed but the run was not complete or could not be verified (collect: ${{ needs.collect.result }})"; exit 1
+          fi
+          echo "All shards green, and every unit ran exactly once."

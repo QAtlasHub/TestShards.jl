@@ -42,6 +42,7 @@ Sharding never changes what a bare `Pkg.test()` means: with no environment set, 
 """
 module TestShards
 
+using Downloads
 using Test
 
 export @shard, @unit, evidence!
@@ -58,6 +59,15 @@ const ENV_OUT = "TESTSHARDS_OUT"
 # Julia process cannot see the checkout, depot restore and precompilation that came before it,
 # which is most of what a shard pays. Absent, the shard's window starts when Julia does.
 const ENV_JOB_START = "TESTSHARDS_JOB_START"
+# Work stealing. Set `TESTSHARDS_CLAIM` and a shard stops running what it was assigned and
+# starts running whatever is still unclaimed — see [`Claimed`](@ref).
+const ENV_CLAIM = "TESTSHARDS_CLAIM"
+const ENV_CLAIM_TOKEN = "TESTSHARDS_CLAIM_TOKEN"
+const ENV_CLAIM_REPO = "TESTSHARDS_CLAIM_REPO"
+const ENV_CLAIM_NS = "TESTSHARDS_CLAIM_NS"
+const ENV_CLAIM_SHA = "TESTSHARDS_CLAIM_SHA"
+const ENV_CLAIM_MIN = "TESTSHARDS_CLAIM_MIN"
+const ENV_CLAIM_API = "TESTSHARDS_CLAIM_API"
 
 # ─────────────────────────────────────────────────────────────────────────────────────
 # Records — the structure a reporting layer consumes
@@ -126,6 +136,7 @@ struct ShardWindow
     finished::Float64
     nunits::Int
     unit_seconds::Float64
+    seen::Int                    # units OBSERVED — the same in every shard
 end
 
 "How long this shard's job was alive."
@@ -141,6 +152,153 @@ See [`ShardWindow`](@ref).
 fixed_cost(w::ShardWindow) = window(w) - w.unit_seconds
 
 # ─────────────────────────────────────────────────────────────────────────────────────
+# Ownership — how a shard decides a unit is its to run
+# ─────────────────────────────────────────────────────────────────────────────────────
+
+"""
+    Ownership
+
+How a shard decides whether a unit is its to run: [`Assigned`](@ref) or [`Claimed`](@ref).
+
+The two are answers to different questions, and which one is right depends on something no
+suite can know about itself — whether the runners start together. [`Observation`](@ref)
+measures that, and [`QueueBound`](@ref) is the diagnosis that says [`Claimed`](@ref) is worth
+its cost here.
+"""
+abstract type Ownership end
+
+"""
+    Assigned <: Ownership
+
+Ownership by computation: every shard packs the same timing history the same way, so a unit
+belongs to exactly one shard and no shard has to ask anyone.
+
+That determinism is the package's central guarantee — and, under a congested queue, precisely
+what is wrong: a shard that starts five minutes late still owns its share, and everyone else
+waits for it. Determinism is what prevents a late runner from taking less.
+"""
+struct Assigned <: Ownership end
+
+"""
+    Claimed <: Ownership
+
+Ownership by claim: a shard sweeps the whole observed sequence and runs whatever nobody has
+taken yet. A shard that starts late claims what is left; if nothing is left it exits, having
+wasted only its own startup instead of delaying everyone.
+
+The primitive is **creating a git ref**, which is an atomic compare-and-swap on the server:
+`POST /repos/:repo/git/refs` creates it or returns 422 because someone else already did. No
+external service and no new secret — `contents: write` is already granted for the timing
+history.
+
+`git push` was the obvious implementation and is the wrong one: every shard would push the same
+commit, so a push to an existing ref pointing at that same commit is a no-op that SUCCEEDS, and
+every shard would believe it had won. Creating a ref fails whatever the sha is.
+
+It buys work stealing at the price of one round trip per unit, and it introduces a failure mode
+static assignment does not have: a shard that claims a unit and then dies leaves a hole. That
+is why [`completeness`](@ref) is not optional — a run that silently skips a unit is exactly the
+green-but-wrong outcome this package refuses everywhere else.
+
+`min_seconds` keeps cheap units on [`Assigned`](@ref): below it, a round trip costs more than
+the unit does. Mixing is safe — static assignment is total over the units it covers, so every
+unit is still owned exactly once.
+"""
+struct Claimed <: Ownership
+    api::String                  # base URL, so a test can point it somewhere it controls
+    repo::String                 # "owner/name"
+    namespace::String            # refs/<namespace>/<index>; per run, so runs cannot collide
+    sha::String                  # any object the ref may point at; only its existence matters
+    token::String
+    min_seconds::Float64
+    attempts::Int
+end
+
+"""
+    _ownership(env) -> Ownership
+
+[`Claimed`](@ref) when `TESTSHARDS_CLAIM` is set AND everything it needs is there, otherwise
+[`Assigned`](@ref).
+
+Asking for claiming without the means is an ERROR, not a downgrade. Falling back quietly would
+turn "the token was not passed" into "the shards ran what they were assigned", which is a
+working run with the wrong strategy — and the whole point of the input is to compare the two.
+"""
+function _ownership(env)
+    wanted = lowercase(strip(get(env, ENV_CLAIM, "")))
+    wanted in ("", "0", "false", "no") && return Assigned()
+    c = Claimed(
+        rstrip(get(env, ENV_CLAIM_API, "https://api.github.com"), '/'),
+        get(env, ENV_CLAIM_REPO, get(env, "GITHUB_REPOSITORY", "")),
+        get(env, ENV_CLAIM_NS, "tsclaim/" * get(env, "GITHUB_RUN_ID", "local")),
+        get(env, ENV_CLAIM_SHA, get(env, "GITHUB_SHA", "")),
+        get(env, ENV_CLAIM_TOKEN, get(env, "GITHUB_TOKEN", "")),
+        something(tryparse(Float64, get(env, ENV_CLAIM_MIN, "")), 0.0),
+        3,
+    )
+    missing_bits = String[]
+    isempty(c.repo) && push!(missing_bits, ENV_CLAIM_REPO)
+    isempty(c.token) && push!(missing_bits, ENV_CLAIM_TOKEN)
+    isempty(c.sha) && push!(missing_bits, ENV_CLAIM_SHA)
+    isempty(missing_bits) || error(
+        "$ENV_CLAIM is set but $(join(missing_bits, ", ")) is not. Claiming cannot fall back " *
+        "to assignment quietly: that would run the suite with the strategy you did not ask " *
+        "for and report it as a success.",
+    )
+    return c
+end
+
+"""
+    _claim(c::Claimed, index) -> Bool
+
+Try to become the owner of `index`. `true` iff this process created the ref.
+
+201 is a win and 422 is a loss — both are answers. Anything else is the network or the token,
+which is NOT an answer: it is retried, and if it never answers the shard errors rather than
+guessing. Guessing "no" silently drops a unit; guessing "yes" runs it twice.
+"""
+function _claim(c::Claimed, index::Integer)
+    url = "$(c.api)/repos/$(c.repo)/git/refs"
+    body = "{\"ref\":$(_jstr("refs/$(c.namespace)/$(index)")),\"sha\":$(_jstr(c.sha))}"
+    headers = [
+        "Authorization" => "Bearer $(c.token)",
+        "Accept" => "application/vnd.github+json",
+        "Content-Type" => "application/json",
+    ]
+    last = ""
+    for attempt in 1:(c.attempts)
+        response = try
+            Downloads.request(
+                url;
+                method="POST",
+                headers=headers,
+                input=IOBuffer(body),
+                output=devnull,
+                throw=false,
+            )
+        catch err                                   # DNS, TLS, connection refused
+            last = sprint(showerror, err)
+            nothing
+        end
+        if response isa Downloads.Response
+            response.status == 201 && return true       # created it: ours
+            response.status == 422 && return false      # already exists: someone else's
+            last = "HTTP $(response.status)"
+            # 401/403 will not improve by trying again, and reads as "everything is claimed".
+            response.status in (401, 403, 404) && break
+        elseif response !== nothing
+            last = string(response)
+        end
+        attempt < c.attempts && sleep(0.5 * attempt)
+    end
+    return error(
+        "TestShards: could not claim unit $(index) ($(last)). Refusing to continue: a shard " *
+        "that cannot claim cannot tell an unclaimed unit from someone else's, and either " *
+        "answer it invents is wrong — a dropped unit or a duplicated one.",
+    )
+end
+
+# ─────────────────────────────────────────────────────────────────────────────────────
 # Shard context
 # ─────────────────────────────────────────────────────────────────────────────────────
 
@@ -154,6 +312,9 @@ mutable struct ShardContext
     unknown::Int                        # units observed that the history did not know
     depth::Int                          # >0 while inside a @unit
     started::Float64                    # epoch seconds; the job's start when CI reported one
+    ownership::Ownership                # assigned by computation, or claimed at run time
+    timings::Dict{String,Float64}       # the history, kept for the claim threshold
+    ran::Vector{Tuple{Int,String}}      # (index, key) of what this shard actually ran
     records::Vector{UnitRecord}
     evidence::IdDict{Any,Dict{String,Any}}   # testset object → evidence attached to it
 end
@@ -224,14 +385,29 @@ history-derived assignment, and falls back to round-robin over the *unknown* uni
 observation order — so a test file added since the last recorded run is still guaranteed to
 land in exactly one shard.
 """
-function _owns(ctx::ShardContext, key::AbstractString)
+function _owns(ctx::ShardContext, key::AbstractString, index::Integer)
     # An explicit list wins outright: naming units IS the request to run exactly those, with or
     # without a shard label. The label then only tags this shard's output files.
     ctx.units === nothing || return key in ctx.units          # manual
     isempty(ctx.shard) && return true                        # unsharded: everything
+    return _owns(ctx.ownership, ctx, key, index)
+end
+
+"The historical assignment, and round-robin over what the history has not seen."
+function _owns(::Assigned, ctx::ShardContext, key::AbstractString, ::Integer)
     haskey(ctx.assignment, key) && return ctx.assignment[key] == ctx.shard
     ctx.unknown += 1
     return "s$((ctx.unknown - 1) % ctx.nshards + 1)" == ctx.shard
+end
+
+"""
+Take it if nobody else has. Cheap units are left to [`Assigned`](@ref): below the threshold a
+round trip costs more than running the unit would, and mixing is safe because static assignment
+is total over the units it still covers.
+"""
+function _owns(c::Claimed, ctx::ShardContext, key::AbstractString, index::Integer)
+    get(ctx.timings, key, Inf) < c.min_seconds && return _owns(Assigned(), ctx, key, index)
+    return _claim(c, index)
 end
 
 # ─────────────────────────────────────────────────────────────────────────────────────
@@ -293,7 +469,8 @@ Failure is re-signalled once, at the end of the whole block.
 function _run(ctx::ShardContext, key::AbstractString, body)
     ctx.seen += 1
     index = ctx.seen
-    _owns(ctx, key) || return nothing
+    _owns(ctx, key, index) || return nothing
+    push!(ctx.ran, (index, String(key)))
 
     ts = Test.DefaultTestSet(key)
     Test.push_testset(ts)
@@ -409,6 +586,14 @@ end
 # ─────────────────────────────────────────────────────────────────────────────────────
 
 function _begin(root::AbstractString; env=ENV)
+    # Installing a second context would replace the first one's, and the first block would then
+    # fail on its next `include` with "not inside a @shard block" — a long way from the cause.
+    # `@shard` blocks do not nest, and the way this happens in practice is a test that wants a
+    # context and reaches for `_begin` to get one, inside the suite the driver is running.
+    CURRENT[] === nothing || error(
+        "TestShards: a @shard block is already running. Blocks do not nest, and a second " *
+        "`_begin` would silently take the first one's place.",
+    )
     units_spec = get(env, ENV_UNITS, "")
     units = if isempty(units_spec)
         nothing
@@ -425,6 +610,7 @@ function _begin(root::AbstractString; env=ENV)
         )
     end
     timings = load_timings(get(env, ENV_TIMINGS, ""))
+    ownership = _ownership(env)
     # A job start reported by CI wins: it includes the checkout, the depot restore and the
     # precompilation, which are the bulk of what a shard pays and are invisible from in here.
     # A malformed value falls back rather than failing — this is measurement, not correctness.
@@ -439,6 +625,9 @@ function _begin(root::AbstractString; env=ENV)
         0,
         0,
         job_start,
+        ownership,
+        timings,
+        Tuple{Int,String}[],
         UnitRecord[],
         IdDict{Any,Dict{String,Any}}(),
     )
@@ -619,7 +808,9 @@ function write_records(ctx::ShardContext, dir::AbstractString)
         end
     end
     # When this shard ran, as opposed to for how long. One row, so the shards' files
-    # concatenate into the timeline of the run — see [`ShardWindow`](@ref).
+    # concatenate into the timeline of the run — see [`ShardWindow`](@ref). The last column is
+    # how many units this shard OBSERVED, identical in every shard, and it is what
+    # [`completeness`](@ref) measures the run against.
     open(joinpath(dir, "shard-$(tag).tsv"), "w") do io
         return println(
             io,
@@ -632,7 +823,17 @@ function write_records(ctx::ShardContext, dir::AbstractString)
             length(ctx.records),
             '\t',
             round(sum(r -> r.duration, ctx.records; init=0.0); digits=3),
+            '\t',
+            ctx.seen,
         )
+    end
+    # WHICH positions in the observed sequence this shard took. Under `Claimed` ownership
+    # nothing can derive that from the assignment, because there is no assignment: the only
+    # record that a unit ran at all is the shard that ran it saying so.
+    open(joinpath(dir, "ran-$(tag).tsv"), "w") do io
+        for (index, key) in ctx.ran
+            println(io, index, '\t', tag, '\t', key)
+        end
     end
     # A flat view of the same tree, `unit <TAB> section path <TAB> seconds`. The planner never
     # reads this — it exists so [`diagnose`](@ref) can say WHERE inside a heavy unit to cut,
@@ -653,6 +854,149 @@ function _write_sections(io, key, prefix, sections)
         _write_sections(io, key, path, s.sections)
     end
     return nothing
+end
+
+# ─────────────────────────────────────────────────────────────────────────────────────
+# Completeness — did the run cover the suite, or only look like it did
+# ─────────────────────────────────────────────────────────────────────────────────────
+
+"""
+    Completeness
+
+Whether the shards between them ran every unit they observed, exactly once.
+
+Under [`Assigned`](@ref) this is a theorem: assignment is a total function of the observed
+sequence, so a unit no shard claims cannot exist. Under [`Claimed`](@ref) it is not — a shard
+that claims a unit and then dies or is cancelled leaves the unit claimed and never run, and the
+merged records are short by one with nothing to say so. That is the green-but-wrong outcome
+this package refuses everywhere else, which is why claiming does not ship without this check.
+
+It is worth running under both. It costs nothing, and it turns the guarantee from something the
+design argues into something each run demonstrates.
+"""
+struct Completeness
+    observed::Int                       # units the shards saw, agreed across shards
+    ran::Vector{Int}                    # positions that ran, sorted
+    missed::Vector{Int}                 # observed but never run — a hole
+    duplicated::Vector{Int}             # run by more than one shard
+    disagreed::Bool                     # shards reported different observation counts
+    placement::Dict{Int,Vector{String}} # position → the shards that ran it
+end
+
+function complete(c::Completeness)
+    return isempty(c.missed) && isempty(c.duplicated) && !c.disagreed && c.observed > 0
+end
+
+"""
+    load_ran(path) -> Vector{Tuple{Int,String,String}}
+
+Read merged `ran-*.tsv` rows: position, shard, unit key. Malformed rows are skipped — but note
+that a row skipped here reads as a MISSING unit downstream, which fails the run rather than
+passing it quietly. That is the safe direction for this particular file.
+"""
+function load_ran(path::AbstractString)
+    rows = Tuple{Int,String,String}[]
+    (isempty(path) || !isfile(path)) && return rows
+    for ln in eachline(path)
+        parts = split(rstrip(ln, ['\n', '\r']), '\t')
+        length(parts) == 3 || continue
+        i = tryparse(Int, parts[1])
+        i === nothing && continue
+        push!(rows, (i, String(parts[2]), String(parts[3])))
+    end
+    return rows
+end
+
+"""
+    completeness(windows, ran) -> Completeness
+
+Check the run against itself: every shard reports how many units it OBSERVED, and each reports
+which positions it took. The two must reconcile.
+"""
+function completeness(
+    windows::AbstractVector{ShardWindow}, ran::AbstractVector{<:Tuple{Int,String,String}}
+)
+    seens = unique(w.seen for w in windows)
+    observed = isempty(seens) ? 0 : maximum(seens)
+    placement = Dict{Int,Vector{String}}()
+    for (i, shard, _) in ran
+        push!(get!(placement, i, String[]), shard)
+    end
+    positions = sort(collect(keys(placement)))
+    return Completeness(
+        observed,
+        positions,
+        [i for i in 1:observed if !haskey(placement, i)],
+        [i for i in positions if length(placement[i]) > 1],
+        length(seens) > 1,
+        placement,
+    )
+end
+
+"""
+    completeness_report(c) -> String
+
+The check as Markdown, naming what is missing rather than only that something is.
+"""
+function completeness_report(c::Completeness)
+    io = IOBuffer()
+    ok = complete(c)
+    println(io, "### Completeness\n")
+    println(io, "| | |\n|---|--:|")
+    println(io, "| units observed | ", c.observed, " |")
+    println(io, "| units run | ", length(c.ran), " |")
+    println(io, "| verdict | ", ok ? "**every unit ran exactly once**" : "**FAILED**", " |")
+    if c.disagreed
+        println(
+            io,
+            "\n> The shards did not agree on how many units the suite has. They did not all ",
+            "observe the same sequence, so nothing downstream — the split, the indices, the ",
+            "merged records — means what it claims to.",
+        )
+    end
+    if !isempty(c.missed)
+        println(
+            io,
+            "\n> **",
+            length(c.missed),
+            " unit(s) never ran**: position(s) ",
+            join(c.missed, ", "),
+            ". Under claimed ownership this is what a shard dying after it claimed work looks ",
+            "like — the run is green and the suite was not tested.",
+        )
+    end
+    if !isempty(c.duplicated)
+        println(
+            io,
+            "\n> **",
+            length(c.duplicated),
+            " unit(s) ran twice**: ",
+            join(("$(i) on " * join(c.placement[i], " and ") for i in c.duplicated), "; "),
+            ". Wasted rather than wrong, but it means two shards both believed they owned it.",
+        )
+    end
+    return String(take!(io))
+end
+
+"""
+    completeness_cli(args = ARGS) -> Int
+
+`shards.tsv ran.tsv` — 0 if the run covered its suite, 1 if it did not. The CI gate calls this,
+which is the only reason claiming is safe to offer at all.
+"""
+function completeness_cli(args=ARGS)
+    length(args) >= 2 ||
+        (println(stderr, "usage: completeness shards.tsv ran.tsv"); return 1)
+    c = completeness(load_shards(args[1]), load_ran(args[2]))
+    print(completeness_report(c))
+    if c.observed == 0
+        println(
+            stderr,
+            "TestShards: no shard reported how many units it observed — cannot verify the run.",
+        )
+        return 1
+    end
+    return complete(c) ? 0 : 1
 end
 
 # ─────────────────────────────────────────────────────────────────────────────────────
@@ -896,21 +1240,28 @@ end
 """
     load_shards(path) -> Vector{ShardWindow}
 
-Read merged `shard-*.tsv` rows (`shard`, started, finished, units, unit seconds). Malformed
-rows are ignored, like [`load_timings`](@ref): a diagnosis must never be the thing that fails a
-run.
+Read merged `shard-*.tsv` rows (`shard`, started, finished, units, unit seconds, observed).
+Malformed rows are ignored, like [`load_timings`](@ref): a diagnosis must never be the thing
+that fails a run.
 """
 function load_shards(path::AbstractString)
     ws = ShardWindow[]
     (isempty(path) || !isfile(path)) && return ws
     for ln in eachline(path)
         parts = split(rstrip(ln, ['\n', '\r']), '\t')
-        length(parts) == 5 || continue
-        nums = map(p -> tryparse(Float64, p), parts[2:5])
+        length(parts) == 6 || continue
+        nums = map(p -> tryparse(Float64, p), parts[2:6])
         any(isnothing, nums) && continue
         push!(
             ws,
-            ShardWindow(String(parts[1]), nums[1], nums[2], round(Int, nums[3]), nums[4]),
+            ShardWindow(
+                String(parts[1]),
+                nums[1],
+                nums[2],
+                round(Int, nums[3]),
+                nums[4],
+                round(Int, nums[5]),
+            ),
         )
     end
     sort!(ws; by=w -> (w.started, w.shard))
