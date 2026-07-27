@@ -1,12 +1,15 @@
 name: Sharded tests
 
-# Reusable: the WHOLE sharded-test vertical, so a consumer repository carries none of it.
+# Reusable: the whole sharded-test vertical, so a consumer repository carries none of it.
 #
-# A repo that adopts this has NO `test/ci/` scripts, NO hand-written test universe, and no
-# per-repo coverage-merge or timing-recording job. It has two things:
+# A repo that adopts this has no shard-planning script, no test-file manifest, no
+# coverage-merge job and no timing-recording job. It has two things:
 #
 #   test/runtests.jl        using MyPackage, TestShards
-#                           TestShards.@runtests oneshots = ["test_aqua.jl"]
+#                           TestShards.@shard begin
+#                               include("core/a.jl")
+#                               ...
+#                           end
 #
 #   .github/workflows/CI.yml
 #                           jobs:
@@ -15,64 +18,81 @@ name: Sharded tests
 #                               with: { shards: 8, runner: '["self-hosted","rosina"]' }
 #                               secrets: inherit
 #
-# What runs here:
-#   plan      install TestShards in a TEMP env and ask it for the matrix — the planner never
-#             loads the package under test, so planning cannot pay its precompile cost.
-#   test      one job per shard; each emits its own lcov and its own timing rows.
-#   coverage  merge every shard's lcov and upload ONCE. This is the part that is otherwise
-#             hand-written in every repo, and the reason per-shard uploads are not used: one
-#             merged report is one coverage number, not N partial ones racing in Codecov.
-#   timings   on push to the default branch only, merge the shards' timings into the
-#             `ci-timings` orphan branch. A PR must never rewrite the history it was planned
-#             against, or two PRs racing would each plan against the other's numbers.
-#   gate      one required-check-shaped job that is green iff every shard was.
+# THERE IS NO PLANNING JOB. Each shard decides what it owns from the same timing history,
+# using the same deterministic assignment, so the matrix carries labels only — no Julia runs
+# before the tests, and nothing has to know what the suite contains in order to split it.
 #
-# Without a timing history the planner emits deterministic round-robin, so the first run of a
-# fresh repo is correct but unbalanced; it balances itself from the second push onward.
+#   test      one job per shard; each writes its own records (JSONL) and timings (TSV).
+#   collect   merge every shard's coverage into ONE Codecov upload, and every shard's records
+#             into one ordered document. This is the part otherwise hand-written per repo.
+#   timings   on the default branch only, fold the timings into the `ci-timings` orphan branch.
+#             A PR must never rewrite the history it was planned against.
+#   gate      one required-check-shaped job, green iff every shard was.
+#
+# With no history the shards fall back to round-robin, so a fresh repo is correct from the
+# first run and balances itself from the second push onward.
 
 on:
   workflow_call:
     inputs:
       shards:
-        description: 'Number of shards to request. The planner emits min(shards, #files).'
+        description: 'Number of shards.'
         type: number
         default: 8
       runner:
         description: 'runs-on as JSON: ''"ubuntu-latest"'' or ''["self-hosted","rosina"]'''
         type: string
         default: '"ubuntu-latest"'
-      plan-runner:
-        description: 'Runner for the tiny plan/merge jobs. Keep hosted: they need no depot.'
+      helper-runner:
+        description: 'Runner for the small merge jobs. Keep hosted: they need no depot.'
         type: string
         default: '"ubuntu-latest"'
       julia-version:
         type: string
         default: '1'
       test-root:
-        description: 'Directory holding the test suite.'
+        description: 'Directory holding runtests.jl, relative to the repository.'
         type: string
         default: 'test'
       coverage:
-        description: 'Merge the shards'' coverage and upload it to Codecov.'
         type: boolean
         default: true
-      testshards-spec:
-        description: 'How the plan job installs TestShards (a Pkg.add argument list).'
-        type: string
-        default: 'url="https://github.com/QAtlasHub/TestShards.jl"'
     secrets:
       CODECOV_TOKEN:
         required: false
 
-permissions:
-  contents: read
+# NO top-level `permissions:` here. In a called workflow each job requests what it needs and
+# the CALLER's grant is the ceiling; a job asking for more than the caller granted makes the
+# whole run fail to START (startup_failure), with no log to read. The caller must therefore
+# grant `contents: write`, which `timings` needs to push the ci-timings orphan branch.
 
 jobs:
-  plan:
-    name: Plan shards
-    runs-on: ${{ fromJSON(inputs.plan-runner) }}
+  # The only thing computed before the tests is the LABELS s1..sN, because GitHub expressions
+  # cannot build a range. No Julia and no checkout: which units a shard owns is decided inside
+  # the shard, from the timing history.
+  labels:
+    name: Shard labels
+    runs-on: ${{ fromJSON(inputs.helper-runner) }}
     outputs:
-      matrix: ${{ steps.plan.outputs.matrix }}
+      matrix: ${{ steps.gen.outputs.matrix }}
+    steps:
+      - id: gen
+        run: |
+          set -euo pipefail
+          n=${{ inputs.shards }}
+          [ "$n" -ge 1 ] || { echo "::error::shards must be >= 1 (got $n)"; exit 1; }
+          m=$(seq 1 "$n" | sed 's/^/"s/; s/$/"/' | paste -sd, -)
+          echo "matrix=[$m]" >> "$GITHUB_OUTPUT"
+          echo "Shards: [$m]"
+
+  test:
+    name: shard ${{ matrix.sid }}
+    needs: labels
+    runs-on: ${{ fromJSON(inputs.runner) }}
+    strategy:
+      fail-fast: false
+      matrix:
+        sid: ${{ fromJSON(needs.labels.outputs.matrix) }}
     steps:
       - uses: actions/checkout@v4
 
@@ -81,75 +101,37 @@ jobs:
           set -euo pipefail
           if git ls-remote --exit-code --heads origin ci-timings >/dev/null 2>&1; then
             git fetch --depth=1 origin ci-timings
-            git show FETCH_HEAD:timings.tsv > timings.tsv 2>/dev/null \
-              && echo "Loaded $(wc -l < timings.tsv) timing rows." \
-              || { echo "ci-timings exists but has no timings.tsv — round-robin."; : > timings.tsv; }
+            git show FETCH_HEAD:timings.tsv > "${{ inputs.test-root }}/.timings.tsv" 2>/dev/null \
+              && echo "Loaded $(wc -l < "${{ inputs.test-root }}/.timings.tsv") timing rows." \
+              || { echo "ci-timings has no timings.tsv — round-robin."; : > "${{ inputs.test-root }}/.timings.tsv"; }
           else
             echo "No ci-timings branch yet — round-robin until the first push to the default branch."
-            : > timings.tsv
+            : > "${{ inputs.test-root }}/.timings.tsv"
           fi
 
-      - uses: julia-actions/setup-julia@v2
-        with:
-          version: ${{ inputs.julia-version }}
-
-      - id: plan
-        name: Ask TestShards for the matrix
-        env:
-          SPEC: ${{ inputs.testshards-spec }}
-          ROOT: ${{ inputs.test-root }}
-          N: ${{ inputs.shards }}
-        run: |
-          set -euo pipefail
-          # A TEMP environment on purpose: the planner must not resolve, precompile, or even
-          # look at the package under test. It only walks the test directory.
-          matrix=$(julia --startup-file=no --project=/dev/null -e '
-            using Pkg
-            Pkg.activate(; temp=true)
-            Pkg.add(; eval(Meta.parse("(" * ENV["SPEC"] * ",)"))...)
-            using TestShards
-            exit(TestShards.main([ENV["N"], "timings.tsv"]; root=ENV["ROOT"]))')
-          if [ -z "$matrix" ] || [ "$matrix" = "[]" ]; then
-            echo "::error::TestShards produced an empty plan"; exit 1
-          fi
-          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
-
-  test:
-    name: shard ${{ matrix.sid }}
-    needs: plan
-    runs-on: ${{ fromJSON(inputs.runner) }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include: ${{ fromJSON(needs.plan.outputs.matrix) }}
-    steps:
-      - uses: actions/checkout@v4
       - uses: julia-actions/setup-julia@v2
         with:
           version: ${{ inputs.julia-version }}
       - uses: julia-actions/cache@v2
         with:
           cache-name: testshards-${{ matrix.sid }}
-          # The default serialises the whole matrix context into the key, which differs per
-          # shard for the file list — every shard would then miss the cache and recompile.
+          # The default serialises the matrix context into the key; with a per-shard value
+          # every shard would miss the cache and recompile from scratch.
           include-matrix: 'false'
       - uses: julia-actions/julia-buildpkg@v1
 
       - name: Run shard ${{ matrix.sid }}
         uses: julia-actions/julia-runtest@v1
         env:
-          TESTSHARDS_FILES: ${{ matrix.files }}
-          TESTSHARDS_ONESHOTS: ${{ matrix.oneshots }}
           TESTSHARDS_ID: ${{ matrix.sid }}
-          # Record only from the default branch (see the header). `Pkg.test` sandboxes the
-          # suite, so the output directory must be pinned into the workspace or the artifact
-          # upload would look somewhere the emitted file never was.
-          TESTSHARDS_EMIT: ${{ github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && '1' || '0' }}
+          TESTSHARDS_N: ${{ inputs.shards }}
+          TESTSHARDS_TIMINGS: ${{ github.workspace }}/${{ inputs.test-root }}/.timings.tsv
+          # `Pkg.test` sandboxes the suite, so the output directory must be pinned into the
+          # workspace or the upload would look where the files never were.
           TESTSHARDS_OUT: ${{ github.workspace }}/${{ inputs.test-root }}/.ci-out
 
       - uses: julia-actions/julia-processcoverage@v1
         if: ${{ inputs.coverage }}
-
       - name: Upload this shard's coverage
         if: ${{ inputs.coverage }}
         uses: actions/upload-artifact@v4
@@ -159,33 +141,34 @@ jobs:
           retention-days: 1
           if-no-files-found: error
 
-      - name: Upload this shard's timings
+      - name: Upload this shard's records and timings
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: testshards-timing-${{ matrix.sid }}
-          path: ${{ inputs.test-root }}/.ci-out/timings-*.tsv
-          retention-days: 1
+          name: testshards-out-${{ matrix.sid }}
+          path: ${{ inputs.test-root }}/.ci-out/*
+          retention-days: 7
           if-no-files-found: ignore
           include-hidden-files: true
 
-  coverage:
-    name: Coverage (merged)
+  collect:
+    name: Collect coverage and records
     needs: test
-    if: ${{ always() && inputs.coverage && needs.test.result != 'cancelled' }}
-    runs-on: ${{ fromJSON(inputs.plan-runner) }}
+    if: ${{ always() && needs.test.result != 'cancelled' }}
+    runs-on: ${{ fromJSON(inputs.helper-runner) }}
     steps:
-      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
-          path: coverage-parts
-          pattern: testshards-coverage-*
-      - name: Merge every shard's lcov into one report
+          path: parts
+          pattern: testshards-*
+
+      - name: Merge every shard's coverage into one report
+        if: ${{ inputs.coverage }}
         run: |
           set -euo pipefail
-          mapfile -t files < <(find coverage-parts -name 'lcov.info' | sort)
+          mapfile -t files < <(find parts -name 'lcov.info' | sort)
           if [ "${#files[@]}" -eq 0 ]; then
-            echo "::error::no coverage artifacts — did every shard fail before processcoverage?"
+            echo "::error::no coverage artifacts — did every shard die before processcoverage?"
             exit 1
           fi
           echo "Merging ${#files[@]} shard reports."
@@ -193,30 +176,63 @@ jobs:
             args=(); for f in "${files[@]}"; do args+=(-a "$f"); done
             lcov "${args[@]}" -o lcov.info
           else
-            # Concatenation IS a valid lcov report: repeated SF: records for the same file are
+            # Concatenation IS a valid lcov report: repeated SF: records for one file are
             # summed by every consumer we target, Codecov included.
             cat "${files[@]}" > lcov.info
           fi
+
       - uses: codecov/codecov-action@v4
+        if: ${{ inputs.coverage }}
         continue-on-error: true          # a flaky upload must not redden a green suite
         with:
           files: lcov.info
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: false
 
+      - name: Merge every shard's records into one ordered document
+        run: |
+          set -euo pipefail
+          # Every record carries `index`, its position in the FULL observed sequence and
+          # identical in every shard, so ordering on it reassembles source order across jobs.
+          find parts -name 'records-*.jsonl' -exec cat {} + > raw.jsonl || : > raw.jsonl
+          # Inlined rather than kept as a script file: this is a REUSABLE workflow, so a
+          # checkout here would fetch the CALLER's repository, which has no script of ours.
+          python3 - raw.jsonl records.jsonl <<'MERGE' >> "$GITHUB_STEP_SUMMARY"
+          import json, pathlib, sys
+          src, dst = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
+          rs = [json.loads(l) for l in src.read_text().splitlines() if l.strip()]
+          rs.sort(key=lambda r: r["index"])
+          dst.write_text("".join(json.dumps(r) + "\n" for r in rs))
+          print("### Units\n")
+          print("| unit | shard | seconds | pass | fail | error |")
+          print("|---|---|--:|--:|--:|--:|")
+          for r in rs:
+              print(f"| `{r['key']}` | {r['shard'] or 'all'} | {r['duration']:.2f} | "
+                    f"{r['npass']} | {r['nfail']} | {r['nerror']} |")
+          MERGE
+          echo "Merged $(wc -l < records.jsonl) unit records."
+
+      - name: Upload the merged records
+        uses: actions/upload-artifact@v4
+        with:
+          name: testshards-records
+          path: records.jsonl
+          retention-days: 30
+          if-no-files-found: warn
+
   timings:
     name: Record timing history
     needs: test
     if: ${{ github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && needs.test.result == 'success' }}
-    runs-on: ${{ fromJSON(inputs.plan-runner) }}
+    runs-on: ${{ fromJSON(inputs.helper-runner) }}
     permissions:
       contents: write                   # force-pushes the ci-timings orphan branch
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
-          path: timing-parts
-          pattern: testshards-timing-*
+          path: parts
+          pattern: testshards-out-*
       - name: Merge into the ci-timings orphan branch (latest value wins)
         run: |
           set -euo pipefail
@@ -227,12 +243,12 @@ jobs:
           else
             : > merged/timings.tsv
           fi
-          find timing-parts -name 'timings-*.tsv' -exec cat {} + >> merged/timings.tsv || true
+          find parts -name 'timings-*.tsv' -exec cat {} + >> merged/timings.tsv || true
           awk -F'\t' 'NF==2{t[$1]=$2} END{for (k in t) print k"\t"t[k]}' \
             merged/timings.tsv | sort > merged/final.tsv
           rows=$(wc -l < merged/final.tsv)
           if [ "$rows" -lt 1 ]; then
-            echo "::error::0 timing rows from a green run — the emit path is broken (TESTSHARDS_EMIT / TESTSHARDS_OUT), and planning would silently round-robin forever."
+            echo "::error::0 timing rows from a green run — TESTSHARDS_OUT is not reaching the sandbox, and the shards would round-robin forever without saying so."
             exit 1
           fi
           echo "Merged $rows timing rows."
@@ -248,15 +264,11 @@ jobs:
 
   gate:
     name: All shards passed
-    needs: [plan, test]
+    needs: test
     if: always()
-    runs-on: ${{ fromJSON(inputs.plan-runner) }}
+    runs-on: ${{ fromJSON(inputs.helper-runner) }}
     steps:
-      - name: Check the plan and every shard
-        run: |
-          if [ "${{ needs.plan.result }}" != "success" ]; then
-            echo "::error::shard planning failed (${{ needs.plan.result }})"; exit 1
-          fi
+      - run: |
           if [ "${{ needs.test.result }}" != "success" ]; then
             echo "::error::one or more shards failed (${{ needs.test.result }})"; exit 1
           fi

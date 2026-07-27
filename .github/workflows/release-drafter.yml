@@ -1,0 +1,3 @@
+name: Release Drafter
+on: { push: { branches: [main] }, pull_request: { types: [opened, reopened, synchronize, edited] } }
+jobs: { draft: { uses: QAtlasHub/.github/.github/workflows/release-drafter.yml@v1, secrets: inherit } }

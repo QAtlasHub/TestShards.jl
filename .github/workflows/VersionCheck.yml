@@ -1,0 +1,3 @@
+name: VersionCheck
+on: { pull_request: { branches: [main] } }
+jobs: { version: { uses: QAtlasHub/.github/.github/workflows/version-check.yml@v1 } }

@@ -1,27 +1,44 @@
 name: CI
+
+# TestShards' own suite runs through TestShards, sharded 8 ways — the package is its own
+# reference deployment. The reference is LOCAL (`./.github/...`), not `@main`, so a pull
+# request exercises the version of the reusable workflow it is changing rather than the one
+# already merged. A bug in the reusable therefore fails its own PR, which is the point.
 on:
   push:
     branches: [main]
     tags: '*'
   pull_request:
   workflow_dispatch:
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
   cancel-in-progress: true
+
 permissions:
   contents: read
+
 jobs:
-  # Deliberately UNSHARDED: this repo's own suite is three files, and running it through
-  # its own reusable workflow would make a bug in the reusable un-diagnosable from CI.
-  # The sharding path is covered by the unit tests instead, which exercise plan/select/emit
-  # directly, and by the consumer repos.
   test:
-    name: julia ${{ matrix.julia }}
+    # `contents: write` is the ceiling passed to the called workflow: its `timings` job pushes
+    # the ci-timings orphan branch. Granting less makes the run fail to START.
+    permissions:
+      contents: write
+    uses: ./.github/workflows/sharded-tests.yml
+    with:
+      shards: 8
+    secrets: inherit
+
+  # The sharded path runs on one Julia version. Compatibility across the supported range is a
+  # different question, so it is asked separately and unsharded — a version matrix times a
+  # shard matrix would be 8N jobs to answer a question that does not need the split.
+  compat:
+    name: julia ${{ matrix.julia }} (unsharded)
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        julia: ['1.10', '1']
+        julia: ['1.10']
     steps:
       - uses: actions/checkout@v4
       - uses: julia-actions/setup-julia@v2
@@ -30,10 +47,3 @@ jobs:
       - uses: julia-actions/cache@v2
       - uses: julia-actions/julia-buildpkg@v1
       - uses: julia-actions/julia-runtest@v1
-      - uses: julia-actions/julia-processcoverage@v1
-      - uses: codecov/codecov-action@v4
-        continue-on-error: true
-        with:
-          files: lcov.info
-          token: ${{ secrets.CODECOV_TOKEN }}
-          fail_ci_if_error: false

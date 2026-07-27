@@ -1,0 +1,12 @@
+name: Publish Release
+on: { push: { tags: ['v*'] }, workflow_dispatch: { inputs: { tag: { description: tag, required: true } } } }
+permissions: { contents: write }
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with: { fetch-depth: 0 }
+      - uses: QAtlasHub/.github/actions/release-notes@v1
+        with:
+          tag: ${{ inputs.tag || github.ref_name }}

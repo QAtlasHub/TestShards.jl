@@ -1,139 +1,140 @@
 """
     TestShards
 
-Split a Julia test suite across CI jobs, balanced by measured per-file runtime.
+Split a Julia test suite across CI jobs, and record what each piece did.
 
-Three pieces, deliberately separable because they run in different processes:
+The shardable units are **whatever `runtests.jl` includes** — not files matching a naming
+convention, and not a list you maintain. `@shard` shadows `include` inside its block, so every
+include call is observed at the moment it happens; a unit computed by a loop over `readdir` is
+seen exactly like a literal one.
 
-  * [`universe`](@ref) — the canonical list of test files, with a **completeness guard**:
-    a directory holding `test_*.jl` that is not declared fails loudly instead of silently
-    running zero tests. This is the part worth having even without sharding.
-  * [`plan`](@ref) / [`plan_json`](@ref) — partition that universe into `N` shards and emit
-    a GitHub Actions `matrix: include:` array. Runs in the *planning* job, which must NOT
-    load the package under test, so nothing here depends on it.
-  * [`runtests`](@ref) — inside `Pkg.test`, select this shard's slice from the environment,
-    run it, and emit per-file timings for the next run's planner.
+```julia
+using MyPackage, TestShards
 
-The loop is: run → emit timings → store them (a `ci-timings` orphan branch is the usual
-place) → next run's planner bin-packs against them. Without a history the planner degrades
-to deterministic round-robin, which is correct but not yet balanced.
+TestShards.@shard begin
+    include("core/test_a.jl")
+    for f in readdir("solver"; join = true)
+        include(f)                       # computed includes are units too
+    end
+    TestShards.@unit "stateful" begin    # one unit: same shard, in this order
+        include("stateful/01_setup.jl")
+        include("stateful/02_use.jl")
+    end
+end
+```
 
-Nothing here runs tests in parallel *within* a job; that is `ParallelTestRunner.jl` /
-`ReTestItems.jl`'s business, and the two compose.
+Two properties make this safe, and both come from every shard observing the *whole* sequence
+and skipping what is not its own:
+
+  * **Nothing is silently dropped.** A unit that no shard claims cannot exist — assignment is a
+    total function of the observed sequence, computed identically in every shard.
+  * **Identity is shard-independent.** A unit is `(key, index)` where `index` is its position in
+    the full sequence, so records from different shards merge into one ordered report.
+
+Within a shard, units run in **observed order**. Across shards order is not preserved — that is
+what parallelism means — so anything order-dependent belongs in one [`@unit`](@ref).
+
+Each unit's `@testset` tree is captured with its per-testset timings and outcomes, giving a
+file → testset hierarchy that a reporting layer can render directly (one page per unit, one
+section per testset). Attach evidence to the running testset with [`evidence!`](@ref).
+
+Sharding never changes what a bare `Pkg.test()` means: with no environment set, everything runs.
 """
 module TestShards
 
 using Test
 
-export Universe,
-    universe, filekey, load_timings, plan, plan_json, select, runtests, @runtests
+export @shard, @unit, evidence!
 
-# Canonical environment protocol. One name per concept, all prefixed, so a repo can grep
-# for who sets what. A migrating repo changes its workflow and its `runtests.jl` in the same
-# commit — they live in the same repository — so no legacy aliases are carried here.
-const ENV_FILES = "TESTSHARDS_FILES"      # "core/test_a.jl,core/test_b.jl" — the planner's slice
-const ENV_SHARD = "TESTSHARDS_SHARD"      # "k/N" — round-robin fallback, no history needed
-const ENV_ONESHOTS = "TESTSHARDS_ONESHOTS" # "1" ⇒ this shard also runs the whole-package checks
-const ENV_ID = "TESTSHARDS_ID"            # shard label, e.g. "s3" (names the timing file)
-const ENV_EMIT = "TESTSHARDS_EMIT"        # "1" ⇒ write timings for the next planner
-const ENV_OUT = "TESTSHARDS_OUT"          # where to write them (see `runtests` on Pkg.test)
+# Manual mode: an explicit unit list, the way a hand-declared test-group matrix works.
+const ENV_UNITS = "TESTSHARDS_UNITS"
+# Auto mode: this shard's label and the shard count; assignment is computed locally.
+const ENV_ID = "TESTSHARDS_ID"
+const ENV_N = "TESTSHARDS_N"
+# Timing history driving the automatic balance, and where to write this run's records.
+const ENV_TIMINGS = "TESTSHARDS_TIMINGS"
+const ENV_OUT = "TESTSHARDS_OUT"
 
 # ─────────────────────────────────────────────────────────────────────────────────────
-# Universe
+# Records — the structure a reporting layer consumes
 # ─────────────────────────────────────────────────────────────────────────────────────
 
 """
-    Universe
+    Section
 
-The canonical, deterministic test-file list: `dirs` in declared order × files sorted
-lexically. Every selection mode picks a SUBSET of `files`, so the union of all shards is
-exactly the whole suite, by construction rather than by hope.
+One `@testset`, with its nested sections. `duration` is wall-clock from Julia's own testset
+bookkeeping, so it is per-section rather than per-file.
 """
-struct Universe
+struct Section
+    name::String
+    duration::Float64
+    npass::Int
+    nfail::Int
+    nerror::Int
+    nbroken::Int
+    evidence::Dict{String,Any}
+    sections::Vector{Section}
+end
+
+"""
+    UnitRecord
+
+One shardable unit: what ran, where, for how long, and what it established.
+
+`index` is the unit's position in the FULL observed sequence, identical in every shard, so
+records merged from separate jobs sort back into source order.
+"""
+struct UnitRecord
+    key::String
+    index::Int
+    shard::String
+    duration::Float64
+    npass::Int
+    nfail::Int
+    nerror::Int
+    nbroken::Int
+    sections::Vector{Section}
+end
+
+# ─────────────────────────────────────────────────────────────────────────────────────
+# Shard context
+# ─────────────────────────────────────────────────────────────────────────────────────
+
+mutable struct ShardContext
     root::String
-    dirs::Vector{String}
-    files::Vector{Tuple{String,String}}
+    shard::String                       # this shard's label; "" when unsharded
+    units::Union{Nothing,Set{String}}   # manual mode: exactly these keys
+    nshards::Int                        # auto mode
+    assignment::Dict{String,String}     # auto mode: known keys → shard, from the history
+    seen::Int                           # units observed so far (owned or not)
+    unknown::Int                        # units observed that the history did not know
+    depth::Int                          # >0 while inside a @unit
+    records::Vector{UnitRecord}
+    evidence::IdDict{Any,Dict{String,Any}}   # testset object → evidence attached to it
 end
 
-Base.length(u::Universe) = length(u.files)
+# Tests run single-threaded inside one process, and `@shard` blocks do not nest, so one
+# current context is enough. Concurrent `@shard` blocks are not supported.
+const CURRENT = Ref{Union{Nothing,ShardContext}}(nothing)
 
 """
-    filekey(dir, file) -> String
+    current() -> Union{Nothing,ShardContext}
 
-The stable `"dir/file"` key used by the timing history, the planner, and `TESTSHARDS_FILES`.
+The `@shard` block currently executing, or `nothing` outside one.
 """
-filekey(d::AbstractString, f::AbstractString) = string(d, f)
+current() = CURRENT[]
 
-_istestfile(f) = startswith(f, "test_") && endswith(f, ".jl")
-_slash(d) = endswith(d, "/") ? String(d) : String(d) * "/"
-
-"""
-    universe(root; dirs = nothing) -> Universe
-
-Build the canonical universe under `root` (your `test/` directory).
-
-**By default the suite is DISCOVERED**: every directory under `root` holding `test_*.jl` is
-included, ordered lexically. Nothing to declare, so nothing can drift — the failure mode
-this replaces is a hand-maintained directory list where adding a test directory and
-forgetting to register it means it silently runs zero tests, forever, while CI stays green.
-
-Pass `dirs` only when you want to PIN the set (to fix an order, or to keep a directory out).
-Then the **completeness guard** runs: a directory holding `test_*.jl` that is not declared
-is an error, and so is a declared directory that is missing or empty. The first catches the
-silent-zero-tests case; the second catches a rename that left the list pointing at nothing.
-
-`root` itself and `ci/` are always exempt — `runtests.jl` and the one-shot checks live there.
-"""
-function universe(root::AbstractString; dirs=nothing)
-    isdir(root) || error("TestShards.universe: test root does not exist: $(repr(root))")
-
-    discovered = Set{String}()
-    for (dir, _, files) in walkdir(root)
-        any(_istestfile, files) || continue
-        rel = replace(relpath(dir, root), '\\' => '/')
-        (rel == "." || rel == "ci" || startswith(rel, "ci/")) && continue
-        push!(discovered, rel * "/")
-    end
-
-    if dirs === nothing
-        declared = sort(collect(discovered))
-        isempty(declared) && error(
-            "TestShards.universe: found no directory holding test_*.jl under $(repr(root)). " *
-            "Test files must be named test_*.jl and live in a subdirectory of test/.",
-        )
-    else
-        declared = [_slash(d) for d in dirs]
-        leaked = sort(collect(setdiff(discovered, Set(declared))))
-        isempty(leaked) || error(
-            "TestShards completeness guard: these directories under $(repr(root)) hold " *
-            "test_*.jl files but are not in `dirs`, so they would never run: $(leaked)",
-        )
-        for d in declared
-            p = joinpath(root, d)
-            (isdir(p) && any(_istestfile, readdir(p))) || error(
-                "TestShards completeness guard: declared directory $(repr(d)) is missing " *
-                "or holds no test_*.jl files under $(repr(root)).",
-            )
-        end
-    end
-
-    files = Tuple{String,String}[]
-    for d in declared, f in sort(filter(_istestfile, readdir(joinpath(root, d))))
-        push!(files, (d, f))
-    end
-    return Universe(String(root), declared, files)
-end
+_ctx() = (c=CURRENT[]; c === nothing ? error("TestShards: not inside a @shard block") : c)
 
 # ─────────────────────────────────────────────────────────────────────────────────────
-# Timing history
+# Timing history and assignment
 # ─────────────────────────────────────────────────────────────────────────────────────
 
 """
     load_timings(path) -> Dict{String,Float64}
 
-Read a `"key\\tseconds"` TSV. A missing file, or a malformed row, is IGNORED rather than
-raised: the timing plane is advisory, and planning must degrade to round-robin, never abort
-CI because a history file got truncated.
+Read a `"key\\tseconds"` TSV. A missing file or a malformed row is IGNORED: the timing plane is
+advisory, and a truncated history must degrade the balance, never abort the run.
 """
 function load_timings(path::AbstractString)
     t = Dict{String,Float64}()
@@ -148,298 +149,441 @@ function load_timings(path::AbstractString)
     return t
 end
 
-# ─────────────────────────────────────────────────────────────────────────────────────
-# Planning
-# ─────────────────────────────────────────────────────────────────────────────────────
-
 """
-    Shard
+    assign(timings, n) -> Dict{String,String}
 
-One CI job's slice: `files` (universe keys), whether it also carries the one-shot
-whole-package checks, and the estimated seconds the planner packed it to.
+Longest-processing-time bin packing of the KNOWN units: heaviest first into the least-loaded
+shard. Computed identically in every shard from the same history, so no coordination is needed
+and no unit can land in two shards.
+
+Units absent from the history are not here; they are assigned on sight, round-robin over the
+order they are observed in (see [`_owns`](@ref)), which is also identical everywhere.
 """
-struct Shard
-    sid::String
-    files::Vector{String}
-    oneshots::Bool
-    est::Float64
-end
-
-"""
-    plan(u::Universe, n::Integer; timings = Dict()) -> Vector{Shard}
-
-Partition `u` into at most `n` shards.
-
-With a timing history: **longest-processing-time** bin packing — take the slowest file
-first, put it in the least-loaded bin. A file with no history is estimated at the **P90** of
-the known times, deliberately pessimistic so a new, surprisingly heavy test is isolated
-rather than piled onto an already-full shard.
-
-Without one: deterministic round-robin. Correct, just not yet balanced.
-
-`n` is a REQUEST, not a promise. Empty bins are dropped, so a suite with fewer files than
-`n` yields `length(u)` shards instead of shards that run nothing. The one-shot checks go to
-the bin that finishes EARLIEST, keeping them off the critical path.
-"""
-function plan(u::Universe, n::Integer; timings::AbstractDict=Dict{String,Float64}())
-    n >= 1 || throw(ArgumentError("TestShards.plan: n must be ≥ 1, got $n"))
-    isempty(u.files) && throw(ArgumentError("TestShards.plan: the universe is empty"))
-    keys_ = [filekey(d, f) for (d, f) in u.files]
-
-    default_t = if isempty(timings)
-        1.0
-    else
-        s = sort(collect(values(timings)))
-        s[clamp(ceil(Int, 0.9 * length(s)), 1, length(s))]
-    end
-    est(k) = Float64(get(timings, k, default_t))
-
-    bins = [String[] for _ in 1:n]
+function assign(timings::AbstractDict, n::Integer)
+    a = Dict{String,String}()
+    n >= 1 || throw(ArgumentError("TestShards.assign: n must be ≥ 1, got $n"))
     loads = zeros(Float64, n)
-    if isempty(timings)
-        for (i, k) in enumerate(keys_)
-            b = ((i - 1) % n) + 1
-            push!(bins[b], k)
-            loads[b] += est(k)
-        end
-    else
-        for k in sort(keys_; by=est, rev=true)
-            b = argmin(loads)
-            push!(bins[b], k)
-            loads[b] += est(k)
-        end
+    for k in sort(collect(keys(timings)); by=k -> (-timings[k], k))   # ties broken by name
+        b = argmin(loads)
+        a[String(k)] = "s$(b)"
+        loads[b] += timings[k]
     end
-
-    keep = [b for b in 1:n if !isempty(bins[b])]
-    bins, loads = bins[keep], loads[keep]
-    aqua_bin = argmin(loads)
-    return [Shard("s$(b)", bins[b], b == aqua_bin, loads[b]) for b in eachindex(bins)]
+    return a
 end
 
-_json_escape(s) = replace(String(s), '\\' => "\\\\", '"' => "\\\"")
-
 """
-    plan_json(shards) -> String
+    _owns(ctx, key) -> Bool
 
-Serialise a plan as the `matrix: include:` array GitHub Actions consumes:
-
-```json
-[{"sid":"s1","files":"core/test_a.jl,core/test_b.jl","oneshots":"1"}, …]
-```
-
-Print this — and ONLY this — on stdout; diagnostics belong on stderr, or they corrupt the
-matrix.
+Does this shard run `key`? Manual mode consults the explicit list. Auto mode consults the
+history-derived assignment, and falls back to round-robin over the *unknown* units in
+observation order — so a test file added since the last recorded run is still guaranteed to
+land in exactly one shard.
 """
-function plan_json(shards::AbstractVector{Shard})
-    io = IOBuffer()
-    print(io, "[")
-    for (i, s) in enumerate(shards)
-        i == 1 || print(io, ",")
-        print(io, "{\"sid\":\"", _json_escape(s.sid), "\",")
-        print(io, "\"files\":\"", _json_escape(join(s.files, ",")), "\",")
-        print(io, "\"oneshots\":\"", s.oneshots ? "1" : "0", "\"}")
-    end
-    print(io, "]")
-    return String(take!(io))
-end
-
-plan_json(u::Universe, n::Integer; kwargs...) = plan_json(plan(u, n; kwargs...))
-
-"""
-    main(args = ARGS; root = "test", dirs = nothing) -> Int
-
-Planner entry point: takes `N [timings.tsv]`, prints the matrix JSON on stdout and a human
-summary on stderr, and returns a process exit code.
-
-This is meant to be called **without any file in the repository being planned** — the
-workflow installs TestShards into a temporary environment and calls this, so a consumer repo
-carries no `ci/` scripts at all:
-
-```
-julia -e 'using Pkg; Pkg.activate(;temp=true); Pkg.add("TestShards");
-          using TestShards; exit(TestShards.main())' 8 timings.tsv
-```
-"""
-function main(args=ARGS; root="test", dirs=nothing)
-    n = tryparse(Int, get(args, 1, ""))
-    (n === nothing || n < 1) &&
-        (println(stderr, "usage: plan_shards.jl <N> [timings.tsv]"); return 1)
-    timings = load_timings(get(args, 2, ""))
-    u = universe(root; dirs)
-    shards = plan(u, n; timings)
-    mode = isempty(timings) ? "round-robin (no timing history)" : "LPT bin-packing"
-    println(
-        stderr,
-        "TestShards: N=$n → $(length(shards)) shards  mode=$mode  files=$(length(u))",
-    )
-    for s in shards
-        println(
-            stderr,
-            "  $(s.sid): $(length(s.files)) files  est=$(round(s.est; digits=1))s" *
-            (s.oneshots ? "  +one-shots" : ""),
-        )
-    end
-    println(plan_json(shards))
-    return 0
+function _owns(ctx::ShardContext, key::AbstractString)
+    # An explicit list wins outright: naming units IS the request to run exactly those, with or
+    # without a shard label. The label then only tags this shard's output files.
+    ctx.units === nothing || return key in ctx.units          # manual
+    isempty(ctx.shard) && return true                        # unsharded: everything
+    haskey(ctx.assignment, key) && return ctx.assignment[key] == ctx.shard
+    ctx.unknown += 1
+    return "s$((ctx.unknown - 1) % ctx.nshards + 1)" == ctx.shard
 end
 
 # ─────────────────────────────────────────────────────────────────────────────────────
-# Selection (inside Pkg.test)
+# Capturing a testset tree
 # ─────────────────────────────────────────────────────────────────────────────────────
 
-"""
-    select(u::Universe; env = ENV) -> (files, description, oneshots)
-
-Resolve this process's slice, in precedence order:
-
-  1. `TESTSHARDS_FILES` — the planner's explicit list. Every entry must be in the universe;
-     one that is not is an error, because it means the planner and the suite disagree about
-     what exists.
-  2. `TESTSHARDS_SHARD="k/N"` — round-robin, history-free.
-  3. neither — the whole suite. This is what a bare `Pkg.test()` does, so sharding never
-     changes what "run the tests" means locally.
-
-If `TESTSHARDS_ID` is set but no slice is given, that is an ERROR rather than a full run:
-it means a workflow wired the shard id but not its selection, and every shard would silently
-run everything — slow, and green for the wrong reason.
-"""
-function select(u::Universe; env=ENV)
-    files_spec = get(env, ENV_FILES, "")
-    shard_spec = get(env, ENV_SHARD, "")
-
-    if !isempty(files_spec)
-        want = [strip(x) for x in split(files_spec, ",") if !isempty(strip(x))]
-        idx = Dict(filekey(d, f) => (d, f) for (d, f) in u.files)
-        sel = Tuple{String,String}[]
-        unknown = String[]
-        for w in want
-            haskey(idx, w) ? push!(sel, idx[w]) : push!(unknown, String(w))
-        end
-        isempty(unknown) || error(
-            "$ENV_FILES names files outside the canonical universe — the planner and the " *
-            "suite disagree about what exists: $(unknown)",
-        )
-        return (sel, "FILES (n=$(length(sel)))", get(env, ENV_ONESHOTS, "0") == "1")
-    end
-
-    if !isempty(shard_spec)
-        parts = split(shard_spec, "/")
-        length(parts) == 2 || error("$ENV_SHARD must be \"k/N\"; got $(repr(shard_spec))")
-        k = tryparse(Int, strip(parts[1]))
-        n = tryparse(Int, strip(parts[2]))
-        (k === nothing || n === nothing) &&
-            error("$ENV_SHARD must be integer \"k/N\"; got $(repr(shard_spec))")
-        (1 <= k <= n) || error("$ENV_SHARD needs 1 ≤ k ≤ N; got $k/$n")
-        n <= length(u) || error(
-            "$ENV_SHARD N=$n exceeds the $(length(u))-file suite; shards " *
-            "$(length(u) + 1)..$n would run zero tests — lower N.",
-        )
-        sel = [tf for (i, tf) in enumerate(u.files) if ((i - 1) % n) + 1 == k]
-        return (sel, "SHARD $k/$n", k == 1)
-    end
-
-    isempty(get(env, ENV_ID, "")) || error(
-        "$ENV_ID is set but neither $ENV_FILES nor $ENV_SHARD is — every shard would run " *
-        "the WHOLE suite and pass for the wrong reason. Fix the workflow that sets these.",
-    )
-    return (u.files, "ALL", true)
-end
-
-# ─────────────────────────────────────────────────────────────────────────────────────
-# Driver
-# ─────────────────────────────────────────────────────────────────────────────────────
-
-"""
-    runtests(u::Universe; oneshots = String[], label = "tests", env = ENV)
-
-Run this shard's slice and, when `TESTSHARDS_EMIT=1`, write per-file timings for the next
-planner.
-
-`oneshots` are whole-package checks (Aqua, a citation check, …) given as paths relative to
-`u.root`. They are NOT shardable units — they run exactly once per plan, in whichever shard
-the planner marked, so they never land on the critical path.
-
-**Where the timings go.** `Pkg.test` copies the suite into a sandbox, so `@__DIR__` points
-somewhere `upload-artifact` will never look. Set `TESTSHARDS_OUT` to a path inside the
-workspace (`\${{ github.workspace }}/test/.ci-out`); it is inherited into the sandbox.
-"""
-function runtests(u::Universe; oneshots=String[], label="tests", env=ENV)
-    sel, desc, run_oneshots = select(u; env)
-    println(
-        "TestShards: $desc → $(length(sel))/$(length(u)) files; one-shots=$(run_oneshots)"
-    )
-
-    emit = get(env, ENV_EMIT, "0") == "1"
-    out = get(env, ENV_OUT, joinpath(u.root, ".ci-out"))
-    sid = get(env, ENV_ID, "local")
-    emit && mkpath(out)
-
-    timings = Tuple{String,Float64}[]
-    # The emit lives in `finally` on purpose: a top-level `@testset` THROWS when anything
-    # inside it failed, so writing afterwards would silently skip exactly the runs whose
-    # timings you still want — a red shard's files took however long they took, and the next
-    # planner should keep packing against that rather than fall back to a stale estimate.
+_duration(ts) =
     try
-        @testset "$label" begin
-            for (d, f) in sel
-                path = joinpath(u.root, d, f)
-                @testset "$f" begin
-                    t = @elapsed Base.include(Main, path)
-                    println("  [time] $(filekey(d, f)): $(round(t; digits=2))s")
-                    push!(timings, (filekey(d, f), t))
-                end
-            end
-            if run_oneshots
-                for o in oneshots
-                    @testset "$o" begin
-                        Base.include(Main, joinpath(u.root, o))
-                    end
-                end
-            end
+        te = ts.time_end
+        te === nothing ? 0.0 : Float64(te - ts.time_start)
+    catch
+        0.0
+    end
+
+function _section(ctx::ShardContext, ts::Test.DefaultTestSet)
+    npass = nfail = nerror = nbroken = 0
+    kids = Section[]
+    for r in ts.results
+        if r isa Test.DefaultTestSet
+            s = _section(ctx, r)
+            push!(kids, s)
+            npass += s.npass
+            nfail += s.nfail
+            nerror += s.nerror
+            nbroken += s.nbroken
+        elseif r isa Test.Pass
+            npass += 1
+        elseif r isa Test.Fail
+            nfail += 1
+        elseif r isa Test.Error
+            nerror += 1
+        elseif r isa Test.Broken
+            nbroken += 1
         end
+    end
+    npass += ts.n_passed          # passes recorded directly on this testset
+    ev = get(ctx.evidence, ts, Dict{String,Any}())
+    return Section(ts.description, _duration(ts), npass, nfail, nerror, nbroken, ev, kids)
+end
+
+# ─────────────────────────────────────────────────────────────────────────────────────
+# Running a unit
+# ─────────────────────────────────────────────────────────────────────────────────────
+
+function _key(ctx::ShardContext, path::AbstractString)
+    return replace(relpath(abspath(path), ctx.root), '\\' => '/')
+end
+
+"""
+    _run(ctx, key, body)
+
+Observe a unit, and run `body` if this shard owns it. The observation counter advances either
+way — that is what keeps `index`, and the round-robin fallback, identical across shards.
+
+The testset is pushed and popped by hand rather than via `@testset` so that the tree can be
+read back even when the unit failed: a top-level `@testset` throws before returning its result.
+Failure is re-signalled once, at the end of the whole block.
+"""
+function _run(ctx::ShardContext, key::AbstractString, body)
+    ctx.seen += 1
+    index = ctx.seen
+    _owns(ctx, key) || return nothing
+
+    ts = Test.DefaultTestSet(key)
+    Test.push_testset(ts)
+    t0 = time()
+    try
+        body()
+    catch err
+        # An error escaping the unit (a load error, say) is recorded as the unit's error rather
+        # than aborting the shard, so the remaining units still run and still get recorded.
+        Test.record(
+            ts,
+            Test.Error(
+                :nontest_error, Expr(:tuple), err, Base.catch_stack(), LineNumberNode(0)
+            ),
+        )
     finally
-        if emit
-            open(joinpath(out, "timings-$(sid).tsv"), "w") do io
-                for (k, t) in timings
-                    println(io, k, '\t', round(t; digits=3))
-                end
-            end
-            println("TestShards: emitted $(length(timings)) rows → $out/timings-$(sid).tsv")
-        end
+        Test.pop_testset()
+    end
+    dt = time() - t0
+    sec = _section(ctx, ts)
+    push!(
+        ctx.records,
+        UnitRecord(
+            key,
+            index,
+            ctx.shard,
+            dt,
+            sec.npass,
+            sec.nfail,
+            sec.nerror,
+            sec.nbroken,
+            sec.sections,
+        ),
+    )
+    status = sec.nfail + sec.nerror == 0 ? "ok" : "FAIL"
+    println(
+        "  [$(status)] $(key)  $(round(dt; digits=2))s  ($(sec.npass) pass, $(sec.nfail) fail, $(sec.nerror) error)",
+    )
+    return nothing
+end
+
+# Paths are resolved against the file that wrote `@shard`, matching what Julia's own `include`
+# does inside a script — NOT against `pwd()`, which differs between a local run and `Pkg.test`.
+function _resolve(ctx::ShardContext, path)
+    return isabspath(path) ? String(path) : joinpath(ctx.root, String(path))
+end
+
+"Include a file as part of the current unit, without opening a new one."
+_plain_include(path) = Base.include(Main, _resolve(_ctx(), path))
+
+# The `include` seen inside a `@shard` block: each call is its own unit, unless we are already
+# inside a `@unit`, in which case it is part of that one.
+function _include(path)
+    ctx = _ctx()
+    ctx.depth > 0 && return Base.include(Main, _resolve(ctx, path))
+    file = _resolve(ctx, path)
+    return _run(ctx, _key(ctx, file), () -> Base.include(Main, file))
+end
+
+function _run_unit(name::AbstractString, body)
+    ctx = _ctx()
+    if ctx.depth > 0                     # nested @unit: already inside a unit, just run it
+        return body()
+    end
+    ctx.depth += 1
+    try
+        _run(ctx, String(name), body)
+    finally
+        ctx.depth -= 1
     end
     return nothing
 end
 
-"""
-    runtests(root::AbstractString; dirs = nothing, oneshots = String[], label = "tests")
+# ─────────────────────────────────────────────────────────────────────────────────────
+# Evidence
+# ─────────────────────────────────────────────────────────────────────────────────────
 
-Discover the universe under `root` and run this shard's slice. The one-argument form most
-suites want; see [`universe`](@ref) for when to pin `dirs`.
 """
-function runtests(root::AbstractString; dirs=nothing, kwargs...)
-    return runtests(universe(root; dirs); kwargs...)
+    evidence!(; kwargs...)
+
+Attach evidence to the `@testset` currently running — what was checked, to what tolerance, on
+what grounds — so the report can state it without a reader going to the source:
+
+```julia
+@testset "inflation preserves the tiling" begin
+    err = norm(inflate(t) - reference)
+    evidence!(; tolerance = 1e-12, achieved = err, oracle = "closed-form inflation matrix")
+    @test err < 1e-12
+end
+```
+
+Values that are not `Real`, `Bool`, or `AbstractString` are stored as their `string()` form, so
+anything is safe to pass. Outside a `@shard` block this is a no-op, which keeps a test file
+runnable on its own.
+"""
+function evidence!(; kwargs...)
+    ctx = CURRENT[]
+    ctx === nothing && return nothing
+    ts = try
+        Test.get_testset()
+    catch
+        return nothing
+    end
+    d = get!(ctx.evidence, ts, Dict{String,Any}())
+    for (k, v) in kwargs
+        d[String(k)] = v isa Union{Real,Bool,AbstractString} ? v : string(v)
+    end
+    return nothing
+end
+
+# ─────────────────────────────────────────────────────────────────────────────────────
+# The block
+# ─────────────────────────────────────────────────────────────────────────────────────
+
+function _begin(root::AbstractString; env=ENV)
+    units_spec = get(env, ENV_UNITS, "")
+    units = if isempty(units_spec)
+        nothing
+    else
+        Set(String(strip(x)) for x in split(units_spec, ",") if !isempty(strip(x)))
+    end
+    shard = get(env, ENV_ID, "")
+    n = something(tryparse(Int, get(env, ENV_N, "")), 1)
+
+    if !isempty(shard) && units === nothing && n <= 1
+        error(
+            "$ENV_ID is set but neither $ENV_UNITS (manual) nor $ENV_N > 1 (auto) is — every " *
+            "shard would run the WHOLE suite and pass for the wrong reason. Fix the workflow.",
+        )
+    end
+    timings = load_timings(get(env, ENV_TIMINGS, ""))
+    ctx = ShardContext(
+        abspath(root),
+        shard,
+        units,
+        n,
+        units === nothing ? assign(timings, n) : Dict{String,String}(),
+        0,
+        0,
+        0,
+        UnitRecord[],
+        IdDict{Any,Dict{String,Any}}(),
+    )
+    mode = if units !== nothing
+        "manual ($(length(units)) units)"
+    elseif isempty(shard)
+        "ALL"
+    else
+        "auto $(shard)/$(n) ($(length(timings)) timed)"
+    end
+    println("TestShards: $mode")
+    CURRENT[] = ctx
+    return ctx
+end
+
+function _end(ctx::ShardContext; env=ENV)
+    CURRENT[] = nothing
+    out = get(env, ENV_OUT, "")
+    isempty(out) || write_records(ctx, out)
+
+    npass = sum(r -> r.npass, ctx.records; init=0)
+    nfail = sum(r -> r.nfail, ctx.records; init=0)
+    nerror = sum(r -> r.nerror, ctx.records; init=0)
+    println(
+        "TestShards: $(length(ctx.records))/$(ctx.seen) units ran — " *
+        "$(npass) pass, $(nfail) fail, $(nerror) error",
+    )
+    # Failure is signalled ONCE, here, because the per-unit testsets were driven by hand
+    # precisely so that a failure would not abort the shard before everything was recorded.
+    nfail + nerror == 0 || error(
+        "TestShards: $(nfail) failed and $(nerror) errored across $(length(ctx.records)) units",
+    )
+    return nothing
 end
 
 """
-    @runtests [kwargs...]
+    @shard begin ... end
 
-Zero-ceremony form for `test/runtests.jl` — resolves the test root from the calling file, so
-a whole sharded suite is two lines:
+Run the block with `include` shadowed, so each include is a shardable unit. See the module
+docstring for the whole picture.
 
-```julia
-using MyPackage, TestShards
-TestShards.@runtests oneshots = ["test_aqua.jl"]
-```
-
-Locally, a bare `Pkg.test()` sets none of the environment variables and therefore runs
-everything, exactly as it did before. Sharding is additive; it never changes what "run the
-tests" means on your machine.
+The test root — what unit keys are relative to — is the directory of the file this macro is
+written in, so keys are stable no matter where CI runs from.
 """
-macro runtests(kwargs...)
-    # The root comes from `__source__` — the CALL SITE's file — not from `@__DIR__`, which
-    # expands where the macro is DEFINED and would resolve to this package's own `src/`.
+macro shard(body)
     root = abspath(dirname(String(__source__.file)))
-    return esc(:($runtests($root; $(kwargs...))))
+    return esc(quote
+        local __ts_ctx = $(_begin)($root)
+        try
+            let include = $(_include)
+                $body
+            end
+        finally
+            $(_end)(__ts_ctx)
+        end
+    end)
+end
+
+"""
+    @unit "name" begin ... end
+
+Treat everything in the block as ONE shardable unit: it runs in a single shard, in the order
+written. This is the only way to keep order-dependent files together, since across shards order
+is not preserved.
+
+It is also the manual-mode handle: in manual mode a shard is given unit names to run, so naming
+a unit is how you assign work by hand rather than by measured time.
+"""
+macro unit(name, body)
+    return esc(quote
+        $(_run_unit)($name, () -> let include = $(_plain_include)
+            $body
+        end)
+    end)
+end
+
+# ─────────────────────────────────────────────────────────────────────────────────────
+# Serialisation — minimal JSON, no dependency (the planner installs this package cold)
+# ─────────────────────────────────────────────────────────────────────────────────────
+
+function _jstr(s)
+    return '"' *
+           replace(
+               String(s),
+               '\\' => "\\\\",
+               '"' => "\\\"",
+               '\n' => "\\n",
+               '\r' => "\\r",
+               '\t' => "\\t",
+           ) *
+           '"'
+end
+
+_jval(v::Bool) = v ? "true" : "false"
+_jval(v::Integer) = string(v)
+_jval(v::Real) = isfinite(v) ? string(Float64(v)) : _jstr(string(v))
+_jval(v::AbstractString) = _jstr(v)
+_jval(v) = _jstr(string(v))
+
+function _jobj(io, pairs)
+    print(io, "{")
+    for (i, (k, v)) in enumerate(pairs)
+        i == 1 || print(io, ",")
+        print(io, _jstr(k), ":", v)
+    end
+    return print(io, "}")
+end
+
+function _jsection(io, s::Section)
+    ev = sprint(
+        io2 -> _jobj(io2, [k => _jval(v) for (k, v) in sort(collect(s.evidence); by=first)])
+    )
+    kids = sprint() do io2
+        print(io2, "[")
+        for (i, c) in enumerate(s.sections)
+            i == 1 || print(io2, ",")
+            _jsection(io2, c)
+        end
+        return print(io2, "]")
+    end
+    return _jobj(
+        io,
+        [
+            "name" => _jval(s.name),
+            "duration" => _jval(s.duration),
+            "npass" => _jval(s.npass),
+            "nfail" => _jval(s.nfail),
+            "nerror" => _jval(s.nerror),
+            "nbroken" => _jval(s.nbroken),
+            "evidence" => ev,
+            "sections" => kids,
+        ],
+    )
+end
+
+"""
+    write_records(ctx, dir)
+
+Write this shard's records as JSONL (one unit per line) plus its timings as TSV.
+
+Two files because they have different consumers and different lifetimes: the TSV is the
+planner's history and is merged into a single ledger, while the JSONL is the report's input and
+is merged into one ordered document. Both key on the same unit key, so they always agree.
+"""
+function write_records(ctx::ShardContext, dir::AbstractString)
+    mkpath(dir)
+    tag = isempty(ctx.shard) ? "local" : ctx.shard
+    open(joinpath(dir, "records-$(tag).jsonl"), "w") do io
+        for r in ctx.records
+            secs = sprint() do io2
+                print(io2, "[")
+                for (i, s) in enumerate(r.sections)
+                    i == 1 || print(io2, ",")
+                    _jsection(io2, s)
+                end
+                return print(io2, "]")
+            end
+            _jobj(
+                io,
+                [
+                    "key" => _jval(r.key),
+                    "index" => _jval(r.index),
+                    "shard" => _jval(r.shard),
+                    "duration" => _jval(r.duration),
+                    "npass" => _jval(r.npass),
+                    "nfail" => _jval(r.nfail),
+                    "nerror" => _jval(r.nerror),
+                    "nbroken" => _jval(r.nbroken),
+                    "sections" => secs,
+                ],
+            )
+            println(io)
+        end
+    end
+    open(joinpath(dir, "timings-$(tag).tsv"), "w") do io
+        for r in ctx.records
+            println(io, r.key, '\t', round(r.duration; digits=3))
+        end
+    end
+    println("TestShards: wrote $(length(ctx.records)) records → $dir")
+    return nothing
+end
+
+"""
+    matrix_json(n) -> String
+
+The GitHub Actions `matrix: include:` array for `n` shards.
+
+It carries only labels. Which units a shard runs is decided **inside** the shard, from the
+timing history, so the planning job never loads the package under test and never needs to know
+what the suite contains.
+"""
+function matrix_json(n::Integer)
+    n >= 1 || throw(ArgumentError("TestShards.matrix_json: n must be ≥ 1, got $n"))
+    return "[" * join(("{\"sid\":\"s$(b)\"}" for b in 1:n), ",") * "]"
 end
 
 end # module TestShards

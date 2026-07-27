@@ -1,9 +1,5 @@
 # TestShards.jl
 
-[![Julia](https://img.shields.io/badge/julia-v1.10+-9558b2.svg)](https://julialang.org)
-[![Code Style: Blue](https://img.shields.io/badge/Code%20Style-Blue-4495d1.svg)](https://github.com/invenia/BlueStyle)
-[![License](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-
 Split a Julia test suite across CI jobs, and record what each piece did.
 
 The units are **whatever `runtests.jl` includes** — no naming convention, no manifest to keep

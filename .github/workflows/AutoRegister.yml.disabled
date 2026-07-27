@@ -1,0 +1,8 @@
+name: AutoRegister
+on:
+  workflow_run: { workflows: ['Release Drafter'], types: [completed], branches: [main] }
+jobs:
+  register:
+    permissions: { contents: write, issues: write }
+    uses: QAtlasHub/.github/.github/workflows/autoregister.yml@v1
+    secrets: inherit

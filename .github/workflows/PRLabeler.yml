@@ -1,0 +1,3 @@
+name: PR Labeler
+on: { pull_request: { types: [opened, edited, synchronize, reopened] } }
+jobs: { label: { uses: QAtlasHub/.github/.github/workflows/labeler.yml@v1 } }
