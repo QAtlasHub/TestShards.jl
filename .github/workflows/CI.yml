@@ -10,6 +10,11 @@ on:
     tags: '*'
   pull_request:
   workflow_dispatch:
+    inputs:
+      steal:
+        description: 'Claim work instead of pre-assigning it — for comparing the two on this suite.'
+        type: boolean
+        default: false
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
@@ -27,6 +32,11 @@ jobs:
     uses: ./.github/workflows/sharded-tests.yml
     with:
       shards: 8
+      # Off for pushes and pull requests, so the recorded history and the required checks stay
+      # on one strategy. Dispatch the workflow to run the other one: the input exists because
+      # "we shipped stealing" and "stealing helped this suite" are different claims, and the
+      # second needs the two measured against each other rather than swapped and hoped for.
+      steal: ${{ github.event_name == 'workflow_dispatch' && inputs.steal }}
       # …and the same reason applies to the PACKAGE, not just to the workflow file. The collect
       # job's reporting steps ARE TestShards, and the default spec installs it from `main`, so
       # a pull request that adds a reporting function would run a workflow that calls it
