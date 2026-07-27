@@ -27,6 +27,12 @@ jobs:
     uses: ./.github/workflows/sharded-tests.yml
     with:
       shards: 8
+      # …and the same reason applies to the PACKAGE, not just to the workflow file. The collect
+      # job's reporting steps ARE TestShards, and the default spec installs it from `main`, so
+      # a pull request that adds a reporting function would run a workflow that calls it
+      # against a copy of the package that does not have it — which is exactly how this line
+      # came to be written. `path="."` is the checkout this run is testing.
+      testshards-spec: 'path="."'
     secrets: inherit
 
   # The sharded path runs on one Julia version. Compatibility across the supported range is a

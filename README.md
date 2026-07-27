@@ -1,6 +1,7 @@
 # TestShards.jl
 
 [![docs: stable](https://img.shields.io/badge/docs-stable-blue.svg)](https://codes.sota-shimozono.com/TestShards.jl/stable/)
+[![codecov](https://codecov.io/gh/QAtlasHub/TestShards.jl/branch/main/graph/badge.svg)](https://app.codecov.io/gh/QAtlasHub/TestShards.jl)
 [![Julia](https://img.shields.io/badge/julia-v1.10+-9558b2.svg)](https://julialang.org)
 [![Code Style: Blue](https://img.shields.io/badge/Code%20Style-Blue-4495d1.svg)](https://github.com/invenia/BlueStyle)
 [![License](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)

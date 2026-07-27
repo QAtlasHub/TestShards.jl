@@ -70,7 +70,7 @@ on:
         type: string
         default: '0'
       testshards-spec:
-        description: 'How the diagnosis step installs TestShards (a Pkg.add argument list).'
+        description: 'How the collect job installs TestShards for its reporting steps (a Pkg.add argument list).'
         type: string
         default: 'url="https://github.com/QAtlasHub/TestShards.jl"'
     secrets:
@@ -183,10 +183,40 @@ jobs:
     if: ${{ always() && needs.test.result != 'cancelled' }}
     runs-on: ${{ fromJSON(inputs.helper-runner) }}
     steps:
+      # FIRST, and not optional. Codecov builds the report's file "network" from the checked
+      # out tree; a report uploaded without one is rejected during server-side PROCESSING,
+      # which is invisible from the run — the upload succeeds as soon as it is queued. This
+      # job never had a checkout, and every sharded run failed to process from the day the
+      # coverage upload moved into it, while the unsharded job that had one was fine.
+      #
+      # It must come before the download: `actions/checkout` cleans the workspace by default
+      # and would delete the artifacts.
+      - uses: actions/checkout@v7
+
       - uses: actions/download-artifact@v8
         with:
           path: parts
           pattern: testshards-*
+
+      # Both reporting steps below are TestShards calling itself, so install it once. Doing the
+      # work in the package rather than in this file is the point: a merge written as a step
+      # script is unreachable from `Pkg.test()`, and the one that used to live here reported
+      # 54.5% for a suite that covered 94.8% for as long as it existed.
+      - uses: julia-actions/setup-julia@v3
+        if: ${{ inputs.coverage || inputs.diagnose }}
+        with:
+          version: ${{ inputs.julia-version }}
+      - name: Install TestShards for the reporting steps
+        if: ${{ inputs.coverage || inputs.diagnose }}
+        env:
+          SPEC: ${{ inputs.testshards-spec }}
+        run: |
+          set -euo pipefail
+          julia --startup-file=no --project=/dev/null -e '
+            using Pkg
+            Pkg.activate(joinpath(ENV["RUNNER_TEMP"], "tsenv"))
+            Pkg.add(; eval(Meta.parse("(" * ENV["SPEC"] * ",)"))...)
+            using TestShards' # precompile HERE, not in the middle of writing a report
 
       - name: Merge every shard's coverage into one report
         if: ${{ inputs.coverage }}
@@ -198,20 +228,12 @@ jobs:
             exit 1
           fi
           echo "Merging ${#files[@]} shard reports."
-          if command -v lcov >/dev/null 2>&1; then
-            args=(); for f in "${files[@]}"; do args+=(-a "$f"); done
-            lcov "${args[@]}" -o lcov.info
-          else
-            # Concatenation IS a valid lcov report: repeated SF: records for one file are
-            # summed by every consumer we target, Codecov included.
-            cat "${files[@]}" > lcov.info
-          fi
-          # Report the number here too. The Codecov upload below is best-effort and stays
-          # silent when the repository is not onboarded, which looks exactly like success.
-          awk -F: '/^LF:/ {f+=$2} /^LH:/ {h+=$2} END {
-                     if (f > 0) printf "| coverage | %.1f%% (%d/%d lines) |\n", 100*h/f, h, f;
-                     else print "| coverage | no line data |" }' lcov.info > cov.md
-          { echo "### Coverage"; echo; echo "| | |"; echo "|---|--:|"; cat cov.md; } \
+          # The merge is a UNION, not a sum: every shard loads the whole package but runs
+          # part of the suite, so a line missed by seven shards and hit by the eighth is
+          # covered. See `TestShards.merge_lcov`, which is where this is tested.
+          julia --startup-file=no --project="$RUNNER_TEMP/tsenv" -e '
+            using TestShards
+            exit(TestShards.merge_lcov_cli(ARGS))' lcov.info "${files[@]}" \
             >> "$GITHUB_STEP_SUMMARY"
 
       - uses: codecov/codecov-action@v7
@@ -219,6 +241,10 @@ jobs:
         continue-on-error: true          # a flaky upload must not redden a green suite
         with:
           files: lcov.info
+          # Without this the CLI ALSO auto-discovers every shard's lcov.info still sitting in
+          # parts/, so the one merged report becomes N+1 uploads of the same coverage — the
+          # opposite of what this job exists to do.
+          disable_search: true
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: false
 
@@ -256,16 +282,10 @@ jobs:
       # What the numbers mean, rather than what they are: how many shards this suite can
       # actually use, what is stopping it using more, and which section of the heaviest unit
       # to cut. Best-effort — a diagnosis must never be the thing that fails a run.
-      - uses: julia-actions/setup-julia@v3
-        if: ${{ inputs.diagnose }}
-        continue-on-error: true
-        with:
-          version: ${{ inputs.julia-version }}
       - name: Diagnose the shape of the suite
         if: ${{ inputs.diagnose }}
         continue-on-error: true
         env:
-          SPEC: ${{ inputs.testshards-spec }}
           SHARDS: ${{ inputs.shards }}
           FIXED: ${{ inputs.fixed-cost-seconds }}
         run: |
@@ -276,10 +296,7 @@ jobs:
           # "the split should give 3.2x" into what the run actually delivered.
           find parts -name 'shard-*.tsv'    -exec cat {} + | sort -u > all-shards.tsv   || : > all-shards.tsv
           [ -s all-timings.tsv ] || { echo "No timings yet — nothing to diagnose."; exit 0; }
-          julia --startup-file=no --project=/dev/null -e '
-            using Pkg
-            Pkg.activate(; temp=true)
-            Pkg.add(; eval(Meta.parse("(" * ENV["SPEC"] * ",)"))...)
+          julia --startup-file=no --project="$RUNNER_TEMP/tsenv" -e '
             using TestShards
             exit(TestShards.diagnose_cli([
                 "all-timings.tsv", "all-sections.tsv", "all-shards.tsv",
