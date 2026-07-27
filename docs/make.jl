@@ -19,6 +19,7 @@ makedocs(;
         "Balancing" => "balancing.md",
         "Records" => "records.md",
         "Guarantees" => "guarantees.md",
+        "Composing" => "composing.md",
         "API" => "api.md",
         "References" => "references.md",
     ],
