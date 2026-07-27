@@ -113,6 +113,12 @@ the fixed cost each shard actually paid.
 
 `started` and `finished` are epoch seconds from the runner's own clock, so a spread of a second
 or two between shards is noise rather than a queue effect.
+
+The window runs from the job's start — CI reports it through `TESTSHARDS_JOB_START` — to the
+moment the test process ends. Per-shard work *after* the tests is therefore outside it:
+processing coverage, uploading artefacts. Measured on this repository that tail is around 25s
+against a 23.5s window, so treat [`fixed_cost`](@ref) as a **lower bound** on what a shard
+costs. See issue #16.
 """
 struct ShardWindow
     shard::String
@@ -128,6 +134,9 @@ window(w::ShardWindow) = w.finished - w.started
 """
 The part of a shard's window that no split of the suite can remove: checkout, depot restore,
 precompilation, and the sandbox `Pkg.test` builds before the first unit runs.
+
+A **lower bound** — whatever the job does after the test process exits is not in the window.
+See [`ShardWindow`](@ref).
 """
 fixed_cost(w::ShardWindow) = window(w) - w.unit_seconds
 
@@ -714,9 +723,32 @@ struct Observation
     unit_seconds::Float64            # Σ over shards of the time their units took
     effective::Float64               # unit_seconds / wall
     fixed::Float64                   # mean over shards of window - unit seconds
+    peak::Int                        # most shards alive at once — the runners actually granted
     first_shard::String
     last_shard::String
     windows::Vector{ShardWindow}     # by start time
+end
+
+"""
+    peak_concurrency(windows) -> Int
+
+The largest number of shards alive at the same instant.
+
+Requesting `N` jobs is not acquiring `N` runners. This counts the ones the scheduler actually
+granted at once, which is the ceiling on any parallelism the split could have delivered.
+"""
+function peak_concurrency(windows::AbstractVector{ShardWindow})
+    isempty(windows) && return 0
+    # A sweep over the endpoints. Ends are processed before starts at equal times, so a shard
+    # that finishes exactly when another begins is not counted as overlapping it.
+    events = vcat([(w.started, 1) for w in windows], [(w.finished, -1) for w in windows])
+    sort!(events; by=e -> (e[1], e[2]))
+    live, peak = 0, 0
+    for (_, delta) in events
+        live += delta
+        peak = max(peak, live)
+    end
+    return peak
 end
 
 """
@@ -741,6 +773,7 @@ function observe(windows::AbstractVector{ShardWindow})
         unit_seconds,
         wall > 0 ? unit_seconds / wall : 0.0,
         sum(fixed_cost, ws) / length(ws),
+        peak_concurrency(ws),
         first(ws).shard,                 # ws is sorted by start, so these are the first
         last(ws).shard,                  # and the last shard to START, not to finish
         ws,
@@ -841,6 +874,188 @@ function diagnose(
     )
 end
 
+# ─────────────────────────────────────────────────────────────────────────────────────
+# What is limiting this suite — as a type, not as a paragraph
+# ─────────────────────────────────────────────────────────────────────────────────────
+
+"""
+    Bottleneck
+
+What is setting this run's wall clock. One of [`QueueBound`](@ref), [`FixedCostBound`](@ref),
+[`FloorBound`](@ref) or [`WorkBound`](@ref).
+
+The same numbers mean opposite things at different scales, and that is the whole reason this is
+a type rather than a sentence in the manual. A 150s suite with a 49s per-shard cost and a 130s
+start window is being destroyed by both; a 40-minute suite with the identical figures is barely
+inconvenienced. A reader can work that out from the raw numbers — but then every consumer
+repository has to work it out again, and the ones that get it wrong get it wrong silently. So
+[`bottleneck`](@ref) decides, and [`remedy`](@ref) and [`usable_shards`](@ref) dispatch on the
+answer.
+"""
+abstract type Bottleneck end
+
+"""
+    QueueBound <: Bottleneck
+
+The shards did not run at the same time, so the wall clock is set by the last one to start.
+Nothing about the split can fix this — see [`Observation`](@ref).
+"""
+struct QueueBound <: Bottleneck end
+
+"""
+    FixedCostBound <: Bottleneck
+
+A shard spends longer getting ready than testing. Splitting further multiplies the setup and
+buys almost nothing; the cost itself has to come down.
+"""
+struct FixedCostBound <: Bottleneck end
+
+"""
+    FloorBound <: Bottleneck
+
+The heaviest single unit is what is left. No split across jobs beats it, so it has to be cut in
+two — `split_here` names where.
+"""
+struct FloorBound <: Bottleneck end
+
+"""
+    WorkBound <: Bottleneck
+
+Nothing is in the way: the work still divides, and more shards would still make the run finish
+sooner. This is the regime the whole design assumes, and the only one in which raising the
+shard count is the right move.
+"""
+struct WorkBound <: Bottleneck end
+
+"""
+    bottleneck(d::Diagnosis) -> Bottleneck
+
+Which of the four regimes this suite is in.
+
+They are tested in the order below, because that is the order in which fixing one exposes the
+next. A queue-bound run tells you nothing about its balance — the balance was never given a
+chance to matter — so there is no point reporting the floor at it.
+
+1. [`QueueBound`](@ref) — the shards were measured, and they overlapped so poorly that the
+   observed wall clock is more than a quarter above the prediction. Needs `shards` to detect;
+   without windows a run cannot know this happened to it.
+2. [`FixedCostBound`](@ref) — the per-shard fixed cost exceeds the heaviest bin, i.e. a shard
+   spends more of its life getting ready than testing.
+3. [`FloorBound`](@ref) — the requested shard count is at or past the knee, so the heaviest
+   single unit is what remains.
+4. [`WorkBound`](@ref) — otherwise.
+"""
+function bottleneck(d::Diagnosis)
+    o = d.observed
+    o !== nothing &&
+        o.wall > 1.25 * d.critical_path &&
+        o.start_window > 0 &&
+        return QueueBound()
+    d.fixed > _max_bin_at(d, d.n) && return FixedCostBound()
+    d.knee <= d.n && return FloorBound()
+    return WorkBound()
+end
+
+"The heaviest bin at `n`, recovered from the wall curve so the timings need not be kept."
+function _max_bin_at(d::Diagnosis, n::Integer)
+    return n <= length(d.walls) ? last(d.walls[n]) - d.fixed : d.floor_time
+end
+
+"""
+    usable_shards(d::Diagnosis) -> Int
+
+How many shards are worth starting, which is not always the knee.
+
+Under [`QueueBound`](@ref) it is the number of runners the scheduler actually granted at once:
+requesting more produced jobs that queued rather than parallelism. Otherwise it is the knee.
+"""
+usable_shards(d::Diagnosis) = usable_shards(bottleneck(d), d)
+usable_shards(::Bottleneck, d::Diagnosis) = d.knee
+function usable_shards(::QueueBound, d::Diagnosis)
+    o = d.observed
+    return o === nothing ? d.knee : clamp(o.peak, 1, d.knee)
+end
+
+"""
+    remedy(d::Diagnosis) -> String
+
+What to do about it, in one sentence, chosen by dispatch on [`bottleneck`](@ref) rather than
+left to the reader.
+"""
+remedy(d::Diagnosis) = remedy(bottleneck(d), d)
+
+function remedy(::QueueBound, d::Diagnosis)
+    o = d.observed
+    return string(
+        "The ",
+        o.nshards,
+        " shards did not overlap: `",
+        o.last_shard,
+        "` started ",
+        round(o.start_window; digits=1),
+        "s after `",
+        o.first_shard,
+        "`, and at most ",
+        o.peak,
+        " ran at once, so the run took ",
+        round(o.wall; digits=1),
+        "s against a predicted ",
+        round(d.critical_path; digits=1),
+        "s. The queue set this wall clock, not the split — a better balance cannot move it and ",
+        "more shards make it worse. Start `shards: ",
+        usable_shards(d),
+        "`, or move to a runner pool that can start them together.",
+    )
+end
+
+function remedy(::FixedCostBound, d::Diagnosis)
+    return string(
+        "Each shard spends ",
+        round(d.fixed; digits=1),
+        "s getting ready and ",
+        round(_max_bin_at(d, d.n); digits=1),
+        "s testing, so `shards: ",
+        d.n,
+        "` buys ",
+        round(d.n * d.fixed; digits=1),
+        "s of setup for it. Lower the setup — cache the depot, drop per-shard work that is not ",
+        "tests, build once — or run `shards: ",
+        usable_shards(d),
+        "`. Splitting further multiplies the cost without touching the wall clock.",
+    )
+end
+
+function remedy(::FloorBound, d::Diagnosis)
+    return string(
+        "`shards: ",
+        d.n,
+        "` is at or past the knee, so `",
+        d.floor_unit,
+        "` (",
+        round(d.floor_time; digits=1),
+        "s) is what is left: no split across jobs finishes sooner than one unit does. Cut it in ",
+        "two",
+        if isempty(d.split_here)
+            ""
+        else
+            " — its heaviest section is `$(first(first(d.split_here)))`"
+        end,
+        ", or drop to `shards: ",
+        usable_shards(d),
+        "` and keep the wall clock you already have.",
+    )
+end
+
+function remedy(::WorkBound, d::Diagnosis)
+    return string(
+        "The work still divides: the knee is at N=",
+        d.knee,
+        " and `shards: ",
+        d.n,
+        "` is below it, so more shards would still make this run finish sooner.",
+    )
+end
+
 function Base.show(io::IO, ::MIME"text/plain", d::Diagnosis)
     row(label, rest...) = println(io, "  ", rpad(label, 18), rest...)
     println(io, "TestShards diagnosis — ", length(d.units), " units")
@@ -870,7 +1085,9 @@ function Base.show(io::IO, ::MIME"text/plain", d::Diagnosis)
             round(o.runner_seconds; digits=1),
             "s runner over ",
             o.nshards,
-            " shards",
+            " shards (",
+            o.peak,
+            " at once)",
         )
         row(
             "effective",
@@ -886,6 +1103,7 @@ function Base.show(io::IO, ::MIME"text/plain", d::Diagnosis)
             " last)",
         )
     end
+    row("bottleneck", nameof(typeof(bottleneck(d))), " — use shards: ", usable_shards(d))
     println(io, "\n  heaviest units")
     for (k, v) in first(d.units, min(5, length(d.units)))
         println(io, "    ", rpad(round(v; digits=1), 8), k)
@@ -931,42 +1149,21 @@ function diagnose_report(d::Diagnosis)
             round(o.wall; digits=1),
             "s) |",
         )
-        println(io, "| start window | ", round(o.start_window; digits=1), "s |")
-    end
-    if d.knee < d.n
         println(
             io,
-            "\n> `shards: ",
-            d.n,
-            "` is past the knee. `shards: ",
-            d.knee,
-            "` finishes at the same wall clock and starts ",
-            d.n - d.knee,
-            " fewer jobs.",
-        )
-    end
-    # The model says what the SPLIT can deliver; it assumes the shards run at the same time.
-    # When they did not, saying so is the whole point — otherwise a run that the queue made
-    # slow reads as a suite that is badly balanced, and the wrong thing gets fixed.
-    if o !== nothing && o.wall > 1.25 * d.critical_path && o.start_window > 0
-        println(
-            io,
-            "\n> The ",
-            o.nshards,
-            " shards did not overlap: `",
-            o.last_shard,
-            "` started ",
+            "| start window | ",
             round(o.start_window; digits=1),
-            "s after `",
-            o.first_shard,
-            "`, so the run finished in ",
-            round(o.wall; digits=1),
-            "s against a predicted ",
-            round(d.critical_path; digits=1),
-            "s. The wall clock here is set by the queue, not by the split — a better balance ",
-            "cannot fix it, and more shards make it worse.",
+            "s (",
+            o.peak,
+            " of ",
+            o.nshards,
+            " shards ran at once) |",
         )
     end
+    # One sentence, chosen by dispatch on what is actually limiting this suite. The four
+    # regimes want opposite actions — split the floor unit, or stop splitting — so leaving the
+    # reader to pick from a list of true statements is how the wrong one gets acted on.
+    println(io, "\n> **", nameof(typeof(bottleneck(d))), ".** ", remedy(d))
     println(io, "\n<details><summary>Heaviest units</summary>\n")
     println(io, "| unit | seconds | share |\n|---|--:|--:|")
     for (k, v) in first(d.units, min(10, length(d.units)))

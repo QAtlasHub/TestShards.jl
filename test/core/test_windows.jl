@@ -98,6 +98,70 @@ end
     @test TestShards.diagnose(t; n=2).fixed == 0.0
 end
 
+@testset "peak concurrency counts the runners actually granted" begin
+    # Eight shards requested, two ever alive at once.
+    serialised = [
+        TestShards.ShardWindow("s$i", 10.0 * i, 10.0 * i + 15, 1, 5.0) for i in 1:8
+    ]
+    @test TestShards.peak_concurrency(serialised) == 2
+    together = [TestShards.ShardWindow("s$i", 0.0, 60.0, 1, 40.0) for i in 1:8]
+    @test TestShards.peak_concurrency(together) == 8
+    # A shard that finishes exactly when the next begins never overlapped it.
+    @test TestShards.peak_concurrency([
+        TestShards.ShardWindow("s1", 0.0, 60.0, 1, 40.0),
+        TestShards.ShardWindow("s2", 60.0, 120.0, 1, 40.0),
+    ]) == 1
+    @test TestShards.peak_concurrency(TestShards.ShardWindow[]) == 0
+end
+
+@testset "the bottleneck is a type, and the advice dispatches on it" begin
+    # The work still divides and the shard count is below the knee: nothing is in the way.
+    even = Dict("u$i" => 10.0 for i in 1:8)
+    @test TestShards.bottleneck(TestShards.diagnose(even; n=2)) isa TestShards.WorkBound
+    @test TestShards.usable_shards(TestShards.diagnose(even; n=2)) == 8
+
+    # Past the knee with one dominant unit: the floor is what is left.
+    heavy = Dict("heavy" => 40.0, "a" => 5.0, "b" => 5.0)
+    d = TestShards.diagnose(heavy; n=8)
+    @test TestShards.bottleneck(d) isa TestShards.FloorBound
+    @test occursin("heavy", TestShards.remedy(d))
+
+    # The same suite where getting ready costs more than the heaviest bin.
+    costly = TestShards.diagnose(heavy; n=8, fixed=200.0)
+    @test TestShards.bottleneck(costly) isa TestShards.FixedCostBound
+    @test occursin("getting ready", TestShards.remedy(costly))
+
+    # And the same suite again, this time measured, with the shards not overlapping. Identical
+    # timings, identical split — a different regime, because of when the jobs ran.
+    late = [
+        TestShards.ShardWindow("s1", 0.0, 60.0, 1, 40.0),
+        TestShards.ShardWindow("s2", 300.0, 325.0, 2, 10.0),
+    ]
+    queued = TestShards.diagnose(heavy; n=2, shards=late)
+    @test TestShards.bottleneck(queued) isa TestShards.QueueBound
+    @test TestShards.usable_shards(queued) == 1        # only one ran at a time
+    @test occursin("did not overlap", TestShards.remedy(queued))
+
+    # Every regime answers, and answers with a shard count that is at least one.
+    for x in (TestShards.diagnose(even; n=2), d, costly, queued)
+        @test TestShards.bottleneck(x) isa TestShards.Bottleneck
+        @test TestShards.usable_shards(x) >= 1
+        @test !isempty(TestShards.remedy(x))
+    end
+end
+
+@testset "the regime depends on scale, not just on the numbers" begin
+    # THE reason this is a type. A 49s fixed cost against a 150s suite is fatal; against a
+    # 40-minute suite it is a rounding error. Same fixed cost, same shard count, opposite
+    # advice — and no consumer repository should have to work that out for itself.
+    small = Dict("u$i" => 150.0 / 12 for i in 1:12)
+    large = Dict("u$i" => 2400.0 / 12 for i in 1:12)
+    @test TestShards.bottleneck(TestShards.diagnose(small; n=8, fixed=49.0)) isa
+        TestShards.FixedCostBound
+    @test TestShards.bottleneck(TestShards.diagnose(large; n=8, fixed=49.0)) isa
+        TestShards.WorkBound
+end
+
 @testset "the report says when the queue, not the split, set the wall clock" begin
     t = Dict("heavy" => 40.0, "a" => 5.0)
     # Shards that overlap: observed wall clock is close to what the model predicts, so there is
@@ -111,6 +175,7 @@ end
     @test occursin("effective parallelism", md)
     @test occursin("When each shard ran", md)
     @test !occursin("did not overlap", md)
+    @test occursin("FloorBound", md)      # the regime is named, not just described
 
     # The same work, one shard starting 300s late.
     late = [

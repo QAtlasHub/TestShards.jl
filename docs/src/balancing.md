@@ -99,8 +99,34 @@ that subtraction — so `diagnose` measures `fixed` rather than guessing it, and
 `fixed-cost-seconds` workflow input can stay at `0`. Set it only to ask what a hypothetical
 price would do to the curve; an explicit value wins over the measured one.
 
+The window ends when the test process does, so per-shard work that happens *after* the tests —
+processing coverage, uploading artefacts — falls outside it. The measured `fixed` is a lower
+bound on what a shard really costs.
+
 `fixed` scales the reported cost but not the knee, so an unmeasured run still answers "how many
 shards can this suite use".
+
+## What is actually limiting this suite
+
+The numbers above support four different conclusions, and they want opposite actions. Rather
+than leave the reader to pick, the diagnosis decides — [`TestShards.bottleneck`](@ref) returns
+one of four types and [`TestShards.remedy`](@ref) and [`TestShards.usable_shards`](@ref)
+dispatch on it:
+
+| regime | what it means | what to do |
+|---|---|---|
+| [`QueueBound`](@ref TestShards.QueueBound) | the shards never overlapped | fewer shards, or a pool that can start them |
+| [`FixedCostBound`](@ref TestShards.FixedCostBound) | a shard spends longer getting ready than testing | lower the setup, or split less |
+| [`FloorBound`](@ref TestShards.FloorBound) | the heaviest single unit is what is left | cut that unit in two |
+| [`WorkBound`](@ref TestShards.WorkBound) | nothing is in the way | more shards would still help |
+
+They are tested in that order, because fixing one is what exposes the next: a queue-bound run
+says nothing about its own balance, since the balance was never given a chance to matter.
+
+This is a type rather than a paragraph because **the same numbers mean opposite things at
+different scales**. A 49 s per-shard cost and a 130 s start window are fatal to a 150 s suite
+and a rounding error on a 40-minute one. Deciding which case you are in is a fact about your
+repository, and every consumer working it out again by hand is how the wrong one gets acted on.
 
 ## Sharing the depot cache
 
@@ -109,7 +135,14 @@ bundled workflow does this: one `cache-name` for the whole matrix, `include-matr
 A shard that starts after another has finished then restores that shard's depot instead of
 building its own, and only one copy is stored per run instead of one per shard.
 
-Do not expect it to move `fixed` much on its own. Measured on this package, precompiling the
-project under test is 3–4 s of a ~49 s fixed cost; the rest is installing Julia, processing
-coverage, and starting a `Pkg.test` sandbox — none of which a depot cache touches. Read your
-own diagnosis before assuming precompilation is where your shards' time goes.
+How much that is worth depends entirely on the dependency tree, and the two ends look nothing
+alike. Measured on *this* package — one dependency — precompilation is 3–4 s of a ~49 s fixed
+cost, so the cache is nearly free and nearly pointless; what is left is installing Julia,
+processing coverage and starting a `Pkg.test` sandbox, none of which a depot cache touches. On a
+suite with a real dependency tree it is the other way round: precompilation dominates the fixed
+cost, and sharing the cache is the difference between paying it once and paying it once per
+shard.
+
+Which of the two you are in is a fact about your repository, not about sharding, and it is
+exactly what the measured `fixed` above tells you. Read it before deciding anything costs too
+much.
