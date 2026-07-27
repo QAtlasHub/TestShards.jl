@@ -198,16 +198,83 @@ jobs:
             exit 1
           fi
           echo "Merging ${#files[@]} shard reports."
-          if command -v lcov >/dev/null 2>&1; then
-            args=(); for f in "${files[@]}"; do args+=(-a "$f"); done
-            lcov "${args[@]}" -o lcov.info
-          else
-            # Concatenation IS a valid lcov report: repeated SF: records for one file are
-            # summed by every consumer we target, Codecov included.
-            cat "${files[@]}" > lcov.info
-          fi
-          # Report the number here too. The Codecov upload below is best-effort and stays
-          # silent when the repository is not onboarded, which looks exactly like success.
+          # A real merge, not a concatenation. Every shard loads the whole package, so all N
+          # reports list the SAME source files and differ only in which lines ran; the union
+          # is what the suite covered. Concatenating instead leaves N `SF:` records for one
+          # file — which this workflow used to do, on the stated assumption that consumers sum
+          # them. Codecov does not: every sharded run from 2026-07-27 failed to process, while
+          # the unsharded runs before it were fine. `lcov` is not on the hosted image, so the
+          # fallback WAS the code path, and the assumption was never exercised anywhere else.
+          python3 - lcov.info "${files[@]}" <<'MERGE'
+          import collections, sys
+
+          out, srcs = sys.argv[1], sys.argv[2:]
+          da = collections.defaultdict(collections.Counter)        # file -> line -> hits
+          fn = collections.defaultdict(dict)                       # file -> name -> line
+          fnda = collections.defaultdict(collections.Counter)      # file -> name -> hits
+          br = collections.defaultdict(dict)                       # file -> (l,b,i) -> taken
+          order, seen = [], set()
+
+          for path in srcs:
+              cur = None
+              for raw in open(path, errors="replace"):
+                  ln = raw.strip()
+                  if ln.startswith("SF:"):
+                      cur = ln[3:]
+                      if cur not in seen:
+                          seen.add(cur)
+                          order.append(cur)
+                  elif cur is None or ln == "end_of_record":
+                      cur = None
+                  elif ln.startswith("DA:"):
+                      n, _, c = ln[3:].partition(",")
+                      da[cur][int(n)] += int(float(c))
+                  elif ln.startswith("FN:"):
+                      n, _, name = ln[3:].partition(",")
+                      fn[cur][name] = int(n)
+                  elif ln.startswith("FNDA:"):
+                      c, _, name = ln[5:].partition(",")
+                      fnda[cur][name] += int(float(c))
+                  elif ln.startswith("BRDA:"):
+                      p = ln[5:].split(",")
+                      if len(p) == 4:
+                          key, taken = tuple(p[:3]), p[3]
+                          prev = br[cur].get(key)
+                          # "-" means the branch was never reached in THAT report; a number
+                          # from any other shard supersedes it.
+                          if taken != "-":
+                              br[cur][key] = (0 if prev in (None, "-") else prev) + int(taken)
+                          elif prev is None:
+                              br[cur][key] = "-"
+
+          with open(out, "w") as f:
+              for sf in order:
+                  f.write("SF:%s\n" % sf)
+                  for name, line in sorted(fn[sf].items(), key=lambda kv: (kv[1], kv[0])):
+                      f.write("FN:%d,%s\n" % (line, name))
+                  for name, c in sorted(fnda[sf].items()):
+                      f.write("FNDA:%d,%s\n" % (c, name))
+                  if fn[sf]:
+                      f.write("FNF:%d\n" % len(fn[sf]))
+                      f.write("FNH:%d\n" % sum(1 for c in fnda[sf].values() if c > 0))
+                  for key, taken in sorted(br[sf].items(), key=lambda kv: int(kv[0][0])):
+                      f.write("BRDA:%s,%s,%s,%s\n" % (key + (taken,)))
+                  if br[sf]:
+                      f.write("BRF:%d\n" % len(br[sf]))
+                      f.write(
+                          "BRH:%d\n" % sum(1 for t in br[sf].values() if t != "-" and t > 0)
+                      )
+                  hits = sorted(da[sf].items())
+                  for n, c in hits:
+                      f.write("DA:%d,%d\n" % (n, c))
+                  f.write("LF:%d\n" % len(hits))
+                  f.write("LH:%d\n" % sum(1 for _, c in hits if c > 0))
+                  f.write("end_of_record\n")
+          print("Merged %d files, %d source files." % (len(srcs), len(order)))
+          MERGE
+          # Report the number here too. The upload below cannot be trusted to say anything:
+          # it reports success as soon as the payload is QUEUED, and a report that fails
+          # server-side processing afterwards looks identical to one that worked.
           awk -F: '/^LF:/ {f+=$2} /^LH:/ {h+=$2} END {
                      if (f > 0) printf "| coverage | %.1f%% (%d/%d lines) |\n", 100*h/f, h, f;
                      else print "| coverage | no line data |" }' lcov.info > cov.md
@@ -219,6 +286,10 @@ jobs:
         continue-on-error: true          # a flaky upload must not redden a green suite
         with:
           files: lcov.info
+          # Without this the CLI ALSO auto-discovers every shard's lcov.info still sitting in
+          # parts/, so the one merged report becomes N+1 uploads of the same coverage — the
+          # opposite of what this job exists to do.
+          disable_search: true
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: false
 
