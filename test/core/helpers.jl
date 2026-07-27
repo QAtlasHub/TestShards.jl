@@ -4,6 +4,7 @@
 module TSHelpers
 
 export make_suite, run_suite, unit_keys
+export shared_suite, whole_units, partition_check, shard_runs_clean
 
 const PROJ = dirname(Base.active_project())
 
@@ -86,6 +87,53 @@ function unit_keys(out)
             init=String[],
         ),
     )
+end
+
+# ── The partition and atomicity checks, one N per unit ────────────────────────────────
+#
+# These dominate the suite, and what they cost is subprocesses: one per shard, per N. Holding
+# every N in one file made that file the heaviest unit and therefore the floor on how fast any
+# split of this suite can finish — which the diagnosis said in as many words. They are one file
+# per N now, and the fixture below is built ONCE per shard process so that splitting them does
+# not multiply the setup instead.
+
+const _SUITE = Ref{Union{Nothing,String}}(nothing)
+const _WHOLE = Ref{Union{Nothing,Vector{String}}}(nothing)
+
+"The fixture suite, built once per process and shared by every N."
+function shared_suite()
+    _SUITE[] === nothing && (_SUITE[] = make_suite())
+    return _SUITE[]
+end
+
+"""
+Every unit key an UNSHARDED run of the fixture executes — the oracle the partition checks
+compare against, so "nothing was dropped" is measured rather than assumed. Computed once per
+process; `test_unsharded.jl` is what asserts this run is itself complete.
+"""
+function whole_units()
+    _WHOLE[] === nothing && (_WHOLE[] = unit_keys(run_suite(shared_suite())[3]))
+    return _WHOLE[]
+end
+
+"Sorted unit keys collected from all `n` shards of the fixture suite."
+function partition_check(n::Integer)
+    got = String[]
+    for k in 1:n
+        _, _, out = run_suite(
+            shared_suite(); env=Dict("TESTSHARDS_ID" => "s$k", "TESTSHARDS_N" => "$n")
+        )
+        append!(got, unit_keys(out))
+    end
+    return sort(got)
+end
+
+"Did shard `k` of `n` finish without error? False means a `@unit` was torn across shards."
+function shard_runs_clean(n::Integer, k::Integer)
+    ok, _, _ = run_suite(
+        shared_suite(); env=Dict("TESTSHARDS_ID" => "s$k", "TESTSHARDS_N" => "$n")
+    )
+    return ok
 end
 
 end # module TSHelpers
