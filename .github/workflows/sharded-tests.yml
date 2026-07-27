@@ -57,6 +57,21 @@ on:
       coverage:
         type: boolean
         default: true
+      diagnose:
+        description: 'Report what the timing history says about the shape of the suite.'
+        type: boolean
+        default: true
+      fixed-cost-seconds:
+        description: >
+          Per-shard cost that does not shrink with more shards (checkout, depot restore,
+          precompile). Measure it as a shard job''s wall clock minus the time its units took.
+          Only scales the reported cost; the knee is the same either way.
+        type: string
+        default: '0'
+      testshards-spec:
+        description: 'How the diagnosis step installs TestShards (a Pkg.add argument list).'
+        type: string
+        default: 'url="https://github.com/QAtlasHub/TestShards.jl"'
     secrets:
       CODECOV_TOKEN:
         required: false
@@ -114,9 +129,12 @@ jobs:
           version: ${{ inputs.julia-version }}
       - uses: julia-actions/cache@v3
         with:
-          cache-name: testshards-${{ matrix.sid }}
-          # The default serialises the matrix context into the key; with a per-shard value
-          # every shard would miss the cache and recompile from scratch.
+          # ONE key for all shards. They instantiate the same project, so a per-shard key
+          # would keep N separate depots and pay precompilation N times over — the dominant
+          # part of the fixed cost that makes over-sharding expensive.
+          cache-name: testshards
+          # Must stay false: the default serialises the whole matrix context into the key,
+          # which differs per shard and would silently undo the line above.
           include-matrix: 'false'
       - uses: julia-actions/julia-buildpkg@v1
 
@@ -180,6 +198,13 @@ jobs:
             # summed by every consumer we target, Codecov included.
             cat "${files[@]}" > lcov.info
           fi
+          # Report the number here too. The Codecov upload below is best-effort and stays
+          # silent when the repository is not onboarded, which looks exactly like success.
+          awk -F: '/^LF:/ {f+=$2} /^LH:/ {h+=$2} END {
+                     if (f > 0) printf "| coverage | %.1f%% (%d/%d lines) |\n", 100*h/f, h, f;
+                     else print "| coverage | no line data |" }' lcov.info > cov.md
+          { echo "### Coverage"; echo; echo "| | |"; echo "|---|--:|"; cat cov.md; } \
+            >> "$GITHUB_STEP_SUMMARY"
 
       - uses: codecov/codecov-action@v7
         if: ${{ inputs.coverage }}
@@ -219,6 +244,36 @@ jobs:
           path: records.jsonl
           retention-days: 30
           if-no-files-found: warn
+
+      # What the numbers mean, rather than what they are: how many shards this suite can
+      # actually use, what is stopping it using more, and which section of the heaviest unit
+      # to cut. Best-effort — a diagnosis must never be the thing that fails a run.
+      - uses: julia-actions/setup-julia@v2
+        if: ${{ inputs.diagnose }}
+        continue-on-error: true
+        with:
+          version: ${{ inputs.julia-version }}
+      - name: Diagnose the shape of the suite
+        if: ${{ inputs.diagnose }}
+        continue-on-error: true
+        env:
+          SPEC: ${{ inputs.testshards-spec }}
+          SHARDS: ${{ inputs.shards }}
+          FIXED: ${{ inputs.fixed-cost-seconds }}
+        run: |
+          set -euo pipefail
+          find parts -name 'timings-*.tsv'  -exec cat {} + | sort -u > all-timings.tsv  || : > all-timings.tsv
+          find parts -name 'sections-*.tsv' -exec cat {} + | sort -u > all-sections.tsv || : > all-sections.tsv
+          [ -s all-timings.tsv ] || { echo "No timings yet — nothing to diagnose."; exit 0; }
+          julia --startup-file=no --project=/dev/null -e '
+            using Pkg
+            Pkg.activate(; temp=true)
+            Pkg.add(; eval(Meta.parse("(" * ENV["SPEC"] * ",)"))...)
+            using TestShards
+            exit(TestShards.diagnose_cli([
+                "all-timings.tsv", "all-sections.tsv",
+                "--shards", ENV["SHARDS"], "--fixed", ENV["FIXED"],
+            ]))' >> "$GITHUB_STEP_SUMMARY"
 
   timings:
     name: Record timing history

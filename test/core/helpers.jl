@@ -69,14 +69,19 @@ function run_suite(d; env=Dict{String,String}())
     return (ok, String(take!(io)), out)
 end
 
-"The unit keys a run actually executed, read back from its emitted timings."
+"""
+The unit keys a run actually executed, read back from its emitted timings.
+
+Matches `timings-*.tsv` specifically, NOT every `.tsv`. `sections-*.tsv` sits beside it and
+also carries the unit key in its first column, so a loose glob counts a unit once per section.
+"""
 function unit_keys(out)
     return sort(
         reduce(
             vcat,
             [
-                first.(split.(readlines(f), '\t')) for
-                f in readdir(out; join=true) if endswith(f, ".tsv")
+                first.(split.(readlines(f), '\t')) for f in readdir(out; join=true) if
+                startswith(basename(f), "timings-") && endswith(f, ".tsv")
             ];
             init=String[],
         ),

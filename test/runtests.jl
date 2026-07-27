@@ -5,6 +5,7 @@ using TestShards
 # only by the assertions inside them.
 TestShards.@shard begin
     include("core/test_assign.jl")
+    include("core/test_diagnose.jl")
     include("core/test_unsharded.jl")
     include("core/test_partition_small.jl")
     include("core/test_partition_large.jl")

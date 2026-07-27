@@ -118,6 +118,35 @@ end
 
 Outside a `@shard` block `evidence!` is a no-op, so a test file stays runnable on its own.
 
+## Diagnosis
+
+The timing history says more than "how to split this run" — it says whether the suite can use
+the shards you are paying for. Every CI run reports it, and you can ask directly:
+
+```julia
+julia> TestShards.diagnose(TestShards.load_timings("timings.tsv"); n = 8, fixed = 60.0)
+TestShards diagnosis — 11 units
+  serial total      152.1s
+  fixed per shard   60.0s
+  at N=8            106.8s wall, 632.1s runner
+  knee              N=4  (N=8 costs more for no gain)
+  floor             core/test_partition_large.jl  46.8s — no split finishes sooner than this
+```
+
+Three things the raw numbers do not say:
+
+- **The knee** — the smallest shard count that reaches the best wall clock. Past it every extra
+  shard pays `fixed` again and returns nothing. This repository measured 8 shards buying 143 →
+  107 s for 4.2x the runner time; the knee was 4.
+- **The floor** — the single heaviest unit. No split across jobs finishes sooner, so this is the
+  only place more parallelism can come from.
+- **Where to cut it.** The records hold per-`@testset` durations, so the diagnosis names the
+  heaviest sections *inside* the floor unit — the ones to lift into their own file.
+
+`fixed` is the per-shard cost that does not shrink with more shards: checkout, depot restore,
+precompilation. Measure it as a shard job's wall clock minus the time its units took. It scales
+the reported cost but not the knee, so leaving it at 0 still answers "how many shards".
+
 ## One requirement sharding imposes
 
 **Every unit must be independently includable.** A shard receives an arbitrary subset, so a
