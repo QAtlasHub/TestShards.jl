@@ -61,8 +61,10 @@ on:
       CODECOV_TOKEN:
         required: false
 
-permissions:
-  contents: read
+# NO top-level `permissions:` here. In a called workflow each job requests what it needs and
+# the CALLER's grant is the ceiling; a job asking for more than the caller granted makes the
+# whole run fail to START (startup_failure), with no log to read. The caller must therefore
+# grant `contents: write`, which `timings` needs to push the ci-timings orphan branch.
 
 jobs:
   # The only thing computed before the tests is the LABELS s1..sN, because GitHub expressions

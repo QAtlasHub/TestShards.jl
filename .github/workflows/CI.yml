@@ -20,6 +20,10 @@ permissions:
 
 jobs:
   test:
+    # `contents: write` is the ceiling passed to the called workflow: its `timings` job pushes
+    # the ci-timings orphan branch. Granting less makes the run fail to START.
+    permissions:
+      contents: write
     uses: ./.github/workflows/sharded-tests.yml
     with:
       shards: 8
