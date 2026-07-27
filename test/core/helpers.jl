@@ -54,6 +54,13 @@ into the suite doing the testing.
 function run_suite(d; env=Dict{String,String}())
     out = mktempdir()
     e = copy(ENV)
+    # Strip the OUTER run's shard variables first. When this suite is itself sharded, the
+    # child would otherwise inherit `TESTSHARDS_ID`/`TESTSHARDS_N` from the shard running the
+    # test and split the fixture suite too — so a test asserting on an unsharded run would see
+    # one eighth of it. Invisible while the suite runs whole; guaranteed once it is sharded.
+    for k in collect(keys(e))
+        startswith(k, "TESTSHARDS_") && delete!(e, k)
+    end
     merge!(e, env)
     e["TESTSHARDS_OUT"] = out
     cmd = `$(Base.julia_cmd()) --startup-file=no --project=$PROJ $(joinpath(d, "runtests.jl"))`
