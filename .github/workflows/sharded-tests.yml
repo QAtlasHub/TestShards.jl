@@ -109,7 +109,7 @@ jobs:
             : > "${{ inputs.test-root }}/.timings.tsv"
           fi
 
-      - uses: julia-actions/setup-julia@v2
+      - uses: julia-actions/setup-julia@v3
         with:
           version: ${{ inputs.julia-version }}
       - uses: julia-actions/cache@v2
