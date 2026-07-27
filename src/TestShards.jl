@@ -1501,21 +1501,31 @@ They are tested in the order below, because that is the order in which fixing on
 next. A queue-bound run tells you nothing about its balance — the balance was never given a
 chance to matter — so there is no point reporting the floor at it.
 
-1. [`QueueBound`](@ref) — the shards were measured, and they overlapped so poorly that the
-   observed wall clock is more than a quarter above the prediction. Needs `shards` to detect;
-   without windows a run cannot know this happened to it.
+1. [`QueueBound`](@ref) — the shards spent a large share of the run waiting for the last one to
+   START. Needs `shards` to detect; without windows a run cannot know this happened to it.
 2. [`FixedCostBound`](@ref) — the per-shard fixed cost exceeds the heaviest bin, i.e. a shard
    spends more of its life getting ready than testing.
 3. [`FloorBound`](@ref) — the requested shard count is at or past the knee, so the heaviest
    single unit is what remains.
 4. [`WorkBound`](@ref) — otherwise.
+
+The queue test is **measured, not modelled**, and it used to be the other way round: "the
+observed wall clock is well above the predicted one". That reads as a queue problem and is not
+one. `critical_path` is built on `fixed`, and `fixed` is a lower bound — the shard windows
+close when the test process exits, so per-shard work after the tests is outside them (see
+[`ShardWindow`](@ref)). An understated `fixed` understates the prediction, and the gap that
+opens gets blamed on the queue. Caught on this package's own CI: eight shards started **2s**
+apart and were still called `QueueBound`, on a 16.7s gap the start window could account for at
+most 2s of.
+
+So the question is asked directly. If the last shard started 2s after the first, the queue did
+not set a 70s wall clock, whatever the model expected.
 """
 function bottleneck(d::Diagnosis)
     o = d.observed
-    o !== nothing &&
-        o.wall > 1.25 * d.critical_path &&
-        o.start_window > 0 &&
-        return QueueBound()
+    # A quarter of the run spent waiting for the last shard to arrive. Below that, whatever
+    # else is wrong, it is not the queue.
+    o !== nothing && o.wall > 0 && o.start_window > 0.25 * o.wall && return QueueBound()
     d.fixed > _max_bin_at(d, d.n) && return FixedCostBound()
     d.knee <= d.n && return FloorBound()
     return WorkBound()
