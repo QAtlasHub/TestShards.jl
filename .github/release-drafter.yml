@@ -25,10 +25,9 @@ version-resolver:
       - 'test'
   default: patch
 
-# Conventional Commits prefix から自動 label 付与。
-# PR title が `feat: ...` なら 'feature' label が付き、release-drafter
-# が categories に分類できる。`!:` または body の `BREAKING CHANGE:` は
-# 'breaking' を付ける。
+# Labels are applied from the Conventional Commits prefix, so a PR titled `feat: ...`
+# gets 'feature' and release-drafter can file it under a category. A `!:` in the title,
+# or `BREAKING CHANGE:` in the body, adds 'breaking'.
 autolabeler:
   - label: 'breaking'
     title:
@@ -68,8 +67,8 @@ autolabeler:
       - 'test/**'
       - '**/test_*.jl'
 
-# 章立て: 章は対応 label の PR が 1 件もない時、release-drafter のデフォルト
-# 動作で見出しごと自動的に省略される (empty section is illegal を満たす)。
+# Sections. A section whose label matched no PR is omitted entirely by release-drafter's
+# default behaviour, so the notes never carry an empty heading.
 categories:
   - title: '⚠️ Breaking Changes'
     labels:

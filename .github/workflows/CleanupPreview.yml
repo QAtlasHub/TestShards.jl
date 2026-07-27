@@ -1,25 +1,3 @@
-name: CleanupPreview
-on:
-  pull_request:
-    types: [closed]
-permissions:
-  contents: write
-jobs:
-  cleanup:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          ref: gh-pages
-      - name: Remove preview directory
-        run: |
-          dir="previews/PR${{ github.event.pull_request.number }}"
-          if [ -d "$dir" ]; then
-            git config user.name "github-actions[bot]"
-            git config user.email "github-actions[bot]@users.noreply.github.com"
-            git rm -r "$dir"
-            git commit -m "chore: remove docs preview for PR#${{ github.event.pull_request.number }}"
-            git push
-          else
-            echo "No preview directory to remove."
-          fi
+name: Cleanup Preview
+on: { pull_request: { types: [closed] } }
+jobs: { cleanup: { uses: QAtlasHub/.github/.github/workflows/docs-cleanup-preview.yml@v1 } }

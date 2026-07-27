@@ -1,55 +1,12 @@
 name: Publish Release
-
-on:
-  push:
-    tags:
-      - 'v*'
-
-permissions:
-  contents: write
-
+on: { push: { tags: ['v*'] }, workflow_dispatch: { inputs: { tag: { description: tag, required: true } } } }
+permissions: { contents: write }
 jobs:
   publish:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with: { fetch-depth: 0 }
+      - uses: QAtlasHub/.github/actions/release-notes@v1
         with:
-          fetch-depth: 0
-
-      - name: Build release body
-        id: body
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          TAG="${{ github.ref_name }}"
-          BODY=$(gh release view "$TAG" --json body --jq '.body' 2>/dev/null || echo "")
-
-          if [ -z "$BODY" ] || [ "$BODY" = "null" ]; then
-            BODY=$(gh release list --limit 50 --json tagName,isDraft \
-              --jq '.[] | select(.isDraft == true) | .tagName' | head -n 1 | xargs -I{} gh release view {} --json body --jq '.body' 2>/dev/null || echo "")
-          fi
-
-          if [ -z "$BODY" ] || [ "$BODY" = "null" ]; then
-            BODY="## Changelog\n\n- See changelog/commit history for details in $TAG."
-          fi
-
-          printf 'content<<EOF\n%s\nEOF\n' "$BODY" >> "$GITHUB_OUTPUT"
-
-      - name: Create or update release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Pass body via env so bash never parses it. Inline
-          # ${{ steps.body.outputs.content }} would interpolate the body
-          # straight into the script source, where backticks inside the body
-          # (e.g. `Version bumped from \`0.22.19\` -> \`0.23.0\`` from
-          # release-drafter or AutoCompatBump output) trigger command
-          # substitution and exit 127.
-          BODY: ${{ steps.body.outputs.content }}
-        run: |
-          TAG="${{ github.ref_name }}"
-
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release edit "$TAG" --title "$TAG" --notes "$BODY" --draft=false
-          else
-            gh release create "$TAG" --title "$TAG" --notes "$BODY"
-          fi
+          tag: ${{ inputs.tag || github.ref_name }}
