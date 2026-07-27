@@ -27,7 +27,9 @@ name: Sharded tests
 #             into one ordered document. This is the part otherwise hand-written per repo.
 #   timings   on the default branch only, fold the timings into the `ci-timings` orphan branch.
 #             A PR must never rewrite the history it was planned against.
-#   gate      one required-check-shaped job, green iff every shard was.
+#   gate      one required-check-shaped job, green iff every shard passed AND every unit ran
+#             exactly once. Those are different claims: a shard can pass having quietly run
+#             nothing, which is what `steal` makes possible and what `collect` checks.
 #
 # With no history the shards fall back to round-robin, so a fresh repo is correct from the
 # first run and balances itself from the second push onward.
@@ -281,10 +283,12 @@ jobs:
           set -euo pipefail
           find parts -name 'shard-*.tsv' -exec cat {} + | sort -u > all-shards.tsv || : > all-shards.tsv
           find parts -name 'ran-*.tsv'   -exec cat {} + | sort -u > all-ran.tsv    || : > all-ran.tsv
+          # tee, not redirect: when this fails it is a required check going red, and the
+          # reason has to be in the log people open first, not only in the run summary.
           julia --startup-file=no --project="$RUNNER_TEMP/tsenv" -e '
             using TestShards
             exit(TestShards.completeness_cli(ARGS))' all-shards.tsv all-ran.tsv \
-            >> "$GITHUB_STEP_SUMMARY"
+            | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Merge every shard's records into one ordered document
         run: |
