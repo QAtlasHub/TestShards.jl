@@ -150,6 +150,43 @@ end
     end
 end
 
+@testset "a run whose shards started together is not queue-bound, whatever the model says" begin
+    # Found on this package's own CI: eight shards started 2.0s apart, ran for 70.4s, and were
+    # called QueueBound because the observed wall clock sat well above the predicted one. The
+    # prediction was what was wrong — `fixed` is a LOWER bound (the windows close when the test
+    # process exits), so it understates, and the gap that opens was being blamed on the queue.
+    # The queue could account for 2s of a 16.7s gap.
+    t = Dict("u$i" => 20.0 for i in 1:8)
+    together = [TestShards.ShardWindow("s$i", i * 0.25, 70.0, 1, 20.0, 8) for i in 1:8]
+    d = TestShards.diagnose(t; n=8, shards=together)
+    @test d.observed.start_window < 0.25 * d.observed.wall
+    @test !(TestShards.bottleneck(d) isa TestShards.QueueBound)
+
+    # The property that was actually missing: the queue verdict must not depend on the model
+    # term at all. `fixed` is a lower bound, so `critical_path` can be arbitrarily pessimistic
+    # about how much of the wall clock is unexplained — and none of that is evidence about WHEN
+    # the shards started, which is the only thing QueueBound claims.
+    for f in (0.0, 1.0, 500.0)
+        @test !(
+            TestShards.bottleneck(TestShards.diagnose(t; n=8, shards=together, fixed=f)) isa
+            TestShards.QueueBound
+        )
+    end
+
+    # The five start windows this repository has actually produced, against its walls. Only the
+    # first three were the queue; the last two were the suite.
+    for (window, wall, queued) in (
+        (199, 277, true), (130, 201, true), (181, 213, true), (4, 86, false), (2, 70, false)
+    )
+        ws = [
+            TestShards.ShardWindow("s1", 0.0, Float64(wall), 1, 20.0, 2),
+            TestShards.ShardWindow("s2", Float64(window), Float64(wall), 1, 20.0, 2),
+        ]
+        got = TestShards.bottleneck(TestShards.diagnose(t; n=8, shards=ws))
+        @test (got isa TestShards.QueueBound) == queued
+    end
+end
+
 @testset "the regime depends on scale, not just on the numbers" begin
     # THE reason this is a type. A 49s fixed cost against a 150s suite is fatal; against a
     # 40-minute suite it is a rounding error. Same fixed cost, same shard count, opposite
