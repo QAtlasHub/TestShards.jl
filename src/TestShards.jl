@@ -68,6 +68,7 @@ const ENV_CLAIM_NS = "TESTSHARDS_CLAIM_NS"
 const ENV_CLAIM_SHA = "TESTSHARDS_CLAIM_SHA"
 const ENV_CLAIM_MIN = "TESTSHARDS_CLAIM_MIN"
 const ENV_CLAIM_API = "TESTSHARDS_CLAIM_API"
+const ENV_CLAIM_TIMEOUT = "TESTSHARDS_CLAIM_TIMEOUT"
 
 # ─────────────────────────────────────────────────────────────────────────────────────
 # Records — the structure a reporting layer consumes
@@ -212,6 +213,7 @@ struct Claimed <: Ownership
     token::String
     min_seconds::Float64
     attempts::Int
+    timeout::Float64             # seconds per attempt; a claim that never answers is a hang
 end
 
 """
@@ -235,6 +237,7 @@ function _ownership(env)
         get(env, ENV_CLAIM_TOKEN, get(env, "GITHUB_TOKEN", "")),
         something(tryparse(Float64, get(env, ENV_CLAIM_MIN, "")), 0.0),
         3,
+        something(tryparse(Float64, get(env, ENV_CLAIM_TIMEOUT, "")), 30.0),
     )
     missing_bits = String[]
     isempty(c.repo) && push!(missing_bits, ENV_CLAIM_REPO)
@@ -274,6 +277,10 @@ function _claim(c::Claimed, index::Integer)
                 headers=headers,
                 input=IOBuffer(body),
                 output=devnull,
+                # A claim that never answers must not hang the shard. Without this the request
+                # can block until the job's own limit hours later, which is strictly worse than
+                # failing: a shard stuck here holds its runner and reports nothing at all.
+                timeout=c.timeout,
                 throw=false,
             )
         catch err                                   # DNS, TLS, connection refused
