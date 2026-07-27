@@ -183,6 +183,16 @@ jobs:
     if: ${{ always() && needs.test.result != 'cancelled' }}
     runs-on: ${{ fromJSON(inputs.helper-runner) }}
     steps:
+      # FIRST, and not optional. Codecov builds the report's file "network" from the checked
+      # out tree; a report uploaded without one is rejected during server-side PROCESSING,
+      # which is invisible from the run — the upload succeeds as soon as it is queued. This
+      # job never had a checkout, and every sharded run failed to process from the day the
+      # coverage upload moved into it, while the unsharded job that had one was fine.
+      #
+      # It must come before the download: `actions/checkout` cleans the workspace by default
+      # and would delete the artifacts.
+      - uses: actions/checkout@v7
+
       - uses: actions/download-artifact@v8
         with:
           path: parts
