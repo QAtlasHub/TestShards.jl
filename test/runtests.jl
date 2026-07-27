@@ -16,5 +16,6 @@ TestShards.@shard begin
     include("core/test_failure.jl")
     include("core/test_records.jl")
     include("core/test_windows.jl")
+    include("core/test_coverage.jl")
     include("test_aqua.jl")
 end

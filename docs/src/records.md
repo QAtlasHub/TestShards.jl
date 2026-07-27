@@ -31,6 +31,22 @@ the run — see [Balancing](balancing.md#Did-the-shards-actually-run-at-the-same
 timestamps are epoch seconds; CI reports the *job's* start through `TESTSHARDS_JOB_START` so
 that the checkout and precompilation the Julia process never sees still fall inside the window.
 
+## Coverage
+
+Each shard writes its own `lcov.info`, and the collect job merges them with
+[`TestShards.merge_lcov`](@ref) before the single upload.
+
+The merge is a **union**, and the distinction matters more than it looks. Every shard loads the
+whole package but runs only part of the suite, so its report marks only the lines *that shard*
+executed — a line missed by seven shards and hit by the eighth is covered. Concatenating the
+tracefiles instead leaves one record per shard for the same source file, which reads as N times
+the line count against a fraction of the hits. This repository reported **54.5%** that way for a
+suite that covered **94.8%**, and Codecov rejected the report outright.
+
+The merge lives in the package rather than in the workflow so that it is reachable from
+`Pkg.test()`. The version that was a step script was wrong for as long as it existed, because
+nothing could test it.
+
 ## Attaching evidence
 
 A passing test says only that it passed. [`evidence!`](@ref) records *what* it established, so

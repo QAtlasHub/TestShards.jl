@@ -70,7 +70,7 @@ on:
         type: string
         default: '0'
       testshards-spec:
-        description: 'How the diagnosis step installs TestShards (a Pkg.add argument list).'
+        description: 'How the collect job installs TestShards for its reporting steps (a Pkg.add argument list).'
         type: string
         default: 'url="https://github.com/QAtlasHub/TestShards.jl"'
     secrets:
@@ -198,6 +198,26 @@ jobs:
           path: parts
           pattern: testshards-*
 
+      # Both reporting steps below are TestShards calling itself, so install it once. Doing the
+      # work in the package rather than in this file is the point: a merge written as a step
+      # script is unreachable from `Pkg.test()`, and the one that used to live here reported
+      # 54.5% for a suite that covered 94.8% for as long as it existed.
+      - uses: julia-actions/setup-julia@v3
+        if: ${{ inputs.coverage || inputs.diagnose }}
+        with:
+          version: ${{ inputs.julia-version }}
+      - name: Install TestShards for the reporting steps
+        if: ${{ inputs.coverage || inputs.diagnose }}
+        env:
+          SPEC: ${{ inputs.testshards-spec }}
+        run: |
+          set -euo pipefail
+          julia --startup-file=no --project=/dev/null -e '
+            using Pkg
+            Pkg.activate(joinpath(ENV["RUNNER_TEMP"], "tsenv"))
+            Pkg.add(; eval(Meta.parse("(" * ENV["SPEC"] * ",)"))...)
+            using TestShards' # precompile HERE, not in the middle of writing a report
+
       - name: Merge every shard's coverage into one report
         if: ${{ inputs.coverage }}
         run: |
@@ -208,87 +228,12 @@ jobs:
             exit 1
           fi
           echo "Merging ${#files[@]} shard reports."
-          # A real merge, not a concatenation. Every shard loads the whole package, so all N
-          # reports list the SAME source files and differ only in which lines ran; the union
-          # is what the suite covered. Concatenating instead leaves N `SF:` records for one
-          # file — which this workflow used to do, on the stated assumption that consumers sum
-          # them. Codecov does not: every sharded run from 2026-07-27 failed to process, while
-          # the unsharded runs before it were fine. `lcov` is not on the hosted image, so the
-          # fallback WAS the code path, and the assumption was never exercised anywhere else.
-          python3 - lcov.info "${files[@]}" <<'MERGE'
-          import collections, sys
-
-          out, srcs = sys.argv[1], sys.argv[2:]
-          da = collections.defaultdict(collections.Counter)        # file -> line -> hits
-          fn = collections.defaultdict(dict)                       # file -> name -> line
-          fnda = collections.defaultdict(collections.Counter)      # file -> name -> hits
-          br = collections.defaultdict(dict)                       # file -> (l,b,i) -> taken
-          order, seen = [], set()
-
-          for path in srcs:
-              cur = None
-              for raw in open(path, errors="replace"):
-                  ln = raw.strip()
-                  if ln.startswith("SF:"):
-                      cur = ln[3:]
-                      if cur not in seen:
-                          seen.add(cur)
-                          order.append(cur)
-                  elif cur is None or ln == "end_of_record":
-                      cur = None
-                  elif ln.startswith("DA:"):
-                      n, _, c = ln[3:].partition(",")
-                      da[cur][int(n)] += int(float(c))
-                  elif ln.startswith("FN:"):
-                      n, _, name = ln[3:].partition(",")
-                      fn[cur][name] = int(n)
-                  elif ln.startswith("FNDA:"):
-                      c, _, name = ln[5:].partition(",")
-                      fnda[cur][name] += int(float(c))
-                  elif ln.startswith("BRDA:"):
-                      p = ln[5:].split(",")
-                      if len(p) == 4:
-                          key, taken = tuple(p[:3]), p[3]
-                          prev = br[cur].get(key)
-                          # "-" means the branch was never reached in THAT report; a number
-                          # from any other shard supersedes it.
-                          if taken != "-":
-                              br[cur][key] = (0 if prev in (None, "-") else prev) + int(taken)
-                          elif prev is None:
-                              br[cur][key] = "-"
-
-          with open(out, "w") as f:
-              for sf in order:
-                  f.write("SF:%s\n" % sf)
-                  for name, line in sorted(fn[sf].items(), key=lambda kv: (kv[1], kv[0])):
-                      f.write("FN:%d,%s\n" % (line, name))
-                  for name, c in sorted(fnda[sf].items()):
-                      f.write("FNDA:%d,%s\n" % (c, name))
-                  if fn[sf]:
-                      f.write("FNF:%d\n" % len(fn[sf]))
-                      f.write("FNH:%d\n" % sum(1 for c in fnda[sf].values() if c > 0))
-                  for key, taken in sorted(br[sf].items(), key=lambda kv: int(kv[0][0])):
-                      f.write("BRDA:%s,%s,%s,%s\n" % (key + (taken,)))
-                  if br[sf]:
-                      f.write("BRF:%d\n" % len(br[sf]))
-                      f.write(
-                          "BRH:%d\n" % sum(1 for t in br[sf].values() if t != "-" and t > 0)
-                      )
-                  hits = sorted(da[sf].items())
-                  for n, c in hits:
-                      f.write("DA:%d,%d\n" % (n, c))
-                  f.write("LF:%d\n" % len(hits))
-                  f.write("LH:%d\n" % sum(1 for _, c in hits if c > 0))
-                  f.write("end_of_record\n")
-          print("Merged %d files, %d source files." % (len(srcs), len(order)))
-          MERGE
-          # Report the number here too. The upload below cannot be trusted to say anything:
-          # it reports success as soon as the payload is QUEUED, and a report that fails
-          # server-side processing afterwards looks identical to one that worked.
-          awk -F: '/^LF:/ {f+=$2} /^LH:/ {h+=$2} END {
-                     if (f > 0) printf "| coverage | %.1f%% (%d/%d lines) |\n", 100*h/f, h, f;
-                     else print "| coverage | no line data |" }' lcov.info > cov.md
-          { echo "### Coverage"; echo; echo "| | |"; echo "|---|--:|"; cat cov.md; } \
+          # The merge is a UNION, not a sum: every shard loads the whole package but runs
+          # part of the suite, so a line missed by seven shards and hit by the eighth is
+          # covered. See `TestShards.merge_lcov`, which is where this is tested.
+          julia --startup-file=no --project="$RUNNER_TEMP/tsenv" -e '
+            using TestShards
+            exit(TestShards.merge_lcov_cli(ARGS))' lcov.info "${files[@]}" \
             >> "$GITHUB_STEP_SUMMARY"
 
       - uses: codecov/codecov-action@v7
@@ -337,16 +282,10 @@ jobs:
       # What the numbers mean, rather than what they are: how many shards this suite can
       # actually use, what is stopping it using more, and which section of the heaviest unit
       # to cut. Best-effort — a diagnosis must never be the thing that fails a run.
-      - uses: julia-actions/setup-julia@v3
-        if: ${{ inputs.diagnose }}
-        continue-on-error: true
-        with:
-          version: ${{ inputs.julia-version }}
       - name: Diagnose the shape of the suite
         if: ${{ inputs.diagnose }}
         continue-on-error: true
         env:
-          SPEC: ${{ inputs.testshards-spec }}
           SHARDS: ${{ inputs.shards }}
           FIXED: ${{ inputs.fixed-cost-seconds }}
         run: |
@@ -357,10 +296,7 @@ jobs:
           # "the split should give 3.2x" into what the run actually delivered.
           find parts -name 'shard-*.tsv'    -exec cat {} + | sort -u > all-shards.tsv   || : > all-shards.tsv
           [ -s all-timings.tsv ] || { echo "No timings yet — nothing to diagnose."; exit 0; }
-          julia --startup-file=no --project=/dev/null -e '
-            using Pkg
-            Pkg.activate(; temp=true)
-            Pkg.add(; eval(Meta.parse("(" * ENV["SPEC"] * ",)"))...)
+          julia --startup-file=no --project="$RUNNER_TEMP/tsenv" -e '
             using TestShards
             exit(TestShards.diagnose_cli([
                 "all-timings.tsv", "all-sections.tsv", "all-shards.tsv",
