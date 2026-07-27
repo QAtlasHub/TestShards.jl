@@ -12,7 +12,16 @@ makedocs(;
         prettyurls=get(ENV, "CI", "false") == "true",
     ),
     modules=[TestShards],
-    pages=["Home" => "index.md", "API" => "api.md", "References" => "references.md"],
+    pages=[
+        "Home" => "index.md",
+        "Getting started" => "getting-started.md",
+        "Units" => "units.md",
+        "Balancing" => "balancing.md",
+        "Records" => "records.md",
+        "Guarantees" => "guarantees.md",
+        "API" => "api.md",
+        "References" => "references.md",
+    ],
 )
 
 deploydocs(; repo="github.com/QAtlasHub/TestShards.jl", devbranch="main", push_preview=true)
