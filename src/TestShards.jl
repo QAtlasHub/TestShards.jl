@@ -54,6 +54,10 @@ const ENV_N = "TESTSHARDS_N"
 # Timing history driving the automatic balance, and where to write this run's records.
 const ENV_TIMINGS = "TESTSHARDS_TIMINGS"
 const ENV_OUT = "TESTSHARDS_OUT"
+# When the JOB holding this shard started, as epoch seconds. CI sets it in its first step; the
+# Julia process cannot see the checkout, depot restore and precompilation that came before it,
+# which is most of what a shard pays. Absent, the shard's window starts when Julia does.
+const ENV_JOB_START = "TESTSHARDS_JOB_START"
 
 # ─────────────────────────────────────────────────────────────────────────────────────
 # Records — the structure a reporting layer consumes
@@ -96,6 +100,37 @@ struct UnitRecord
     sections::Vector{Section}
 end
 
+"""
+    ShardWindow
+
+When one shard ran, in absolute time, and how much of that window it spent on units.
+
+The per-unit durations say how the work divides; they cannot say whether the shards ran *at the
+same time*. Under a congested queue they do not, and then the wall clock is set by the last
+shard to start rather than by the heaviest bin. This is the record that makes that visible:
+merged across shards it gives the start window, the observed wall clock and, by subtraction,
+the fixed cost each shard actually paid.
+
+`started` and `finished` are epoch seconds from the runner's own clock, so a spread of a second
+or two between shards is noise rather than a queue effect.
+"""
+struct ShardWindow
+    shard::String
+    started::Float64
+    finished::Float64
+    nunits::Int
+    unit_seconds::Float64
+end
+
+"How long this shard's job was alive."
+window(w::ShardWindow) = w.finished - w.started
+
+"""
+The part of a shard's window that no split of the suite can remove: checkout, depot restore,
+precompilation, and the sandbox `Pkg.test` builds before the first unit runs.
+"""
+fixed_cost(w::ShardWindow) = window(w) - w.unit_seconds
+
 # ─────────────────────────────────────────────────────────────────────────────────────
 # Shard context
 # ─────────────────────────────────────────────────────────────────────────────────────
@@ -109,6 +144,7 @@ mutable struct ShardContext
     seen::Int                           # units observed so far (owned or not)
     unknown::Int                        # units observed that the history did not know
     depth::Int                          # >0 while inside a @unit
+    started::Float64                    # epoch seconds; the job's start when CI reported one
     records::Vector{UnitRecord}
     evidence::IdDict{Any,Dict{String,Any}}   # testset object → evidence attached to it
 end
@@ -380,6 +416,10 @@ function _begin(root::AbstractString; env=ENV)
         )
     end
     timings = load_timings(get(env, ENV_TIMINGS, ""))
+    # A job start reported by CI wins: it includes the checkout, the depot restore and the
+    # precompilation, which are the bulk of what a shard pays and are invisible from in here.
+    # A malformed value falls back rather than failing — this is measurement, not correctness.
+    job_start = something(tryparse(Float64, get(env, ENV_JOB_START, "")), time())
     ctx = ShardContext(
         abspath(root),
         shard,
@@ -389,6 +429,7 @@ function _begin(root::AbstractString; env=ENV)
         0,
         0,
         0,
+        job_start,
         UnitRecord[],
         IdDict{Any,Dict{String,Any}}(),
     )
@@ -568,6 +609,22 @@ function write_records(ctx::ShardContext, dir::AbstractString)
             println(io, r.key, '\t', round(r.duration; digits=3))
         end
     end
+    # When this shard ran, as opposed to for how long. One row, so the shards' files
+    # concatenate into the timeline of the run — see [`ShardWindow`](@ref).
+    open(joinpath(dir, "shard-$(tag).tsv"), "w") do io
+        return println(
+            io,
+            tag,
+            '\t',
+            round(ctx.started; digits=3),
+            '\t',
+            round(time(); digits=3),
+            '\t',
+            length(ctx.records),
+            '\t',
+            round(sum(r -> r.duration, ctx.records; init=0.0); digits=3),
+        )
+    end
     # A flat view of the same tree, `unit <TAB> section path <TAB> seconds`. The planner never
     # reads this — it exists so [`diagnose`](@ref) can say WHERE inside a heavy unit to cut,
     # without anything downstream having to parse JSON.
@@ -614,6 +671,83 @@ function load_sections(path::AbstractString)
 end
 
 """
+    load_shards(path) -> Vector{ShardWindow}
+
+Read merged `shard-*.tsv` rows (`shard`, started, finished, units, unit seconds). Malformed
+rows are ignored, like [`load_timings`](@ref): a diagnosis must never be the thing that fails a
+run.
+"""
+function load_shards(path::AbstractString)
+    ws = ShardWindow[]
+    (isempty(path) || !isfile(path)) && return ws
+    for ln in eachline(path)
+        parts = split(rstrip(ln, ['\n', '\r']), '\t')
+        length(parts) == 5 || continue
+        nums = map(p -> tryparse(Float64, p), parts[2:5])
+        any(isnothing, nums) && continue
+        push!(
+            ws,
+            ShardWindow(String(parts[1]), nums[1], nums[2], round(Int, nums[3]), nums[4]),
+        )
+    end
+    sort!(ws; by=w -> (w.started, w.shard))
+    return ws
+end
+
+"""
+    Observation
+
+What the shards of one run actually did in absolute time, as opposed to what the model predicts.
+
+The model behind [`Diagnosis`](@ref) assumes the shards run concurrently. `effective` is the
+number of shards that assumption was worth: the work done divided by the wall clock it took. It
+equals the shard count only when they truly overlap, and falls towards 1 — or below it, since
+each shard re-pays first-use compilation — as the queue spreads them out.
+"""
+struct Observation
+    nshards::Int
+    started::Float64                 # epoch: the first shard's start
+    finished::Float64                # epoch: the last shard's finish
+    wall::Float64                    # finished - started
+    start_window::Float64            # last start - first start
+    runner_seconds::Float64          # Σ over shards of their window
+    unit_seconds::Float64            # Σ over shards of the time their units took
+    effective::Float64               # unit_seconds / wall
+    fixed::Float64                   # mean over shards of window - unit seconds
+    first_shard::String
+    last_shard::String
+    windows::Vector{ShardWindow}     # by start time
+end
+
+"""
+    observe(windows) -> Union{Nothing,Observation}
+
+Fold the shards' windows into the run-level figures. `nothing` for an empty list, so a caller
+can pass whatever CI collected without checking first.
+"""
+function observe(windows::AbstractVector{ShardWindow})
+    isempty(windows) && return nothing
+    ws = sort(collect(windows); by=w -> (w.started, w.shard))
+    started, finished = minimum(w.started for w in ws), maximum(w.finished for w in ws)
+    wall = finished - started
+    unit_seconds = sum(w.unit_seconds for w in ws)
+    return Observation(
+        length(ws),
+        started,
+        finished,
+        wall,
+        maximum(w.started for w in ws) - started,
+        sum(window, ws),
+        unit_seconds,
+        wall > 0 ? unit_seconds / wall : 0.0,
+        sum(fixed_cost, ws) / length(ws),
+        first(ws).shard,                 # ws is sorted by start, so these are the first
+        last(ws).shard,                  # and the last shard to START, not to finish
+        ws,
+    )
+end
+
+"""
     Diagnosis
 
 What the timing history says about the shape of the suite, rather than about any one run.
@@ -625,6 +759,10 @@ which `walls` stops improving — past it, more shards buy nothing and cost a fi
 
 The floor is the single heaviest unit: no split of the suite across jobs can finish sooner
 than that, so `floor_unit` is the only place where more parallelism can come from.
+
+`observed` is the same run as measured rather than modelled, when the shards reported their
+windows. The model's whole premise is that the shards overlap; `observed` is what says whether
+they did.
 """
 struct Diagnosis
     n::Int
@@ -637,6 +775,7 @@ struct Diagnosis
     units::Vector{Pair{String,Float64}}          # heaviest first
     walls::Vector{Pair{Int,Float64}}
     split_here::Vector{Pair{String,Float64}}     # sections of the floor unit, heaviest first
+    observed::Union{Nothing,Observation}
 end
 
 "Load of the heaviest bin when LPT-packing `timings` into `n` shards."
@@ -650,23 +789,30 @@ function _max_bin(timings::AbstractDict, n::Integer)
 end
 
 """
-    diagnose(timings; n = 8, fixed = 0.0, sections = Dict()) -> Diagnosis
+    diagnose(timings; n = 8, fixed = 0.0, sections = Dict(), shards = ShardWindow[]) -> Diagnosis
 
 Answer three questions the raw numbers do not: how many shards this suite can actually use,
 what is stopping it from using more, and where to cut to move that limit.
 
-`fixed` is the per-shard cost that does not shrink with more shards. Measure it as a shard's
-job wall clock minus the time its units took; it is usually dominated by precompilation, and
-it is what makes over-sharding expensive rather than merely useless.
+`fixed` is the per-shard cost that does not shrink with more shards: a shard's job wall clock
+minus the time its units took. It is what makes over-sharding expensive rather than merely
+useless. **Pass `shards` and it is measured rather than guessed** — each window carries exactly
+that subtraction, and their mean becomes `fixed` unless an explicit non-zero `fixed` overrides
+it. `shards` also decides whether the model's premise held: see [`Observation`](@ref).
 """
 function diagnose(
     timings::AbstractDict;
     n::Integer=8,
     fixed::Real=0.0,
     sections::AbstractDict=Dict{String,Vector{Pair{String,Float64}}}(),
+    shards::AbstractVector{ShardWindow}=ShardWindow[],
 )
     isempty(timings) &&
         throw(ArgumentError("TestShards.diagnose: the timing history is empty"))
+    observed = observe(shards)
+    # A measured fixed cost beats a declared one, but only when nothing was declared: a caller
+    # who passes `fixed` is asking what a hypothetical price would do to the curve.
+    fixed = fixed > 0 || observed === nothing ? fixed : max(observed.fixed, 0.0)
     units = sort([String(k) => Float64(v) for (k, v) in timings]; by=last, rev=true)
     serial = sum(last, units)
     floor_unit, floor_time = first(units)
@@ -691,37 +837,55 @@ function diagnose(
         units,
         walls,
         secs,
+        observed,
     )
 end
 
 function Base.show(io::IO, ::MIME"text/plain", d::Diagnosis)
+    row(label, rest...) = println(io, "  ", rpad(label, 18), rest...)
     println(io, "TestShards diagnosis — ", length(d.units), " units")
-    println(io, "  serial total      ", round(d.serial; digits=1), "s")
-    d.fixed > 0 && println(io, "  fixed per shard   ", round(d.fixed; digits=1), "s")
-    println(
-        io,
-        "  at N=",
-        d.n,
-        "           ",
+    row("serial total", round(d.serial; digits=1), "s")
+    d.fixed > 0 && row("fixed per shard", round(d.fixed; digits=1), "s")
+    row(
+        "predicted at N=$(d.n)",
         round(d.critical_path; digits=1),
         "s wall, ",
         round(d.n * d.fixed + d.serial; digits=1),
         "s runner",
     )
-    println(
-        io,
-        "  knee              N=",
-        d.knee,
-        d.knee < d.n ? "  (N=$(d.n) costs more for no gain)" : "",
-    )
-    println(
-        io,
-        "  floor             ",
+    row("knee", "N=", d.knee, d.knee < d.n ? "  (N=$(d.n) costs more for no gain)" : "")
+    row(
+        "floor",
         d.floor_unit,
         "  ",
         round(d.floor_time; digits=1),
         "s — no split finishes sooner than this",
     )
+    o = d.observed
+    if o !== nothing
+        row(
+            "observed",
+            round(o.wall; digits=1),
+            "s wall, ",
+            round(o.runner_seconds; digits=1),
+            "s runner over ",
+            o.nshards,
+            " shards",
+        )
+        row(
+            "effective",
+            round(o.effective; digits=1),
+            "x of ",
+            o.nshards,
+            " — start window ",
+            round(o.start_window; digits=1),
+            "s (",
+            o.first_shard,
+            " first, ",
+            o.last_shard,
+            " last)",
+        )
+    end
     println(io, "\n  heaviest units")
     for (k, v) in first(d.units, min(5, length(d.units)))
         println(io, "    ", rpad(round(v; digits=1), 8), k)
@@ -747,11 +911,28 @@ function diagnose_report(d::Diagnosis)
     println(io, "| units | ", length(d.units), " |")
     println(io, "| serial total | ", round(d.serial; digits=1), "s |")
     d.fixed > 0 && println(io, "| fixed cost per shard | ", round(d.fixed; digits=1), "s |")
-    println(io, "| wall at N=", d.n, " | ", round(d.critical_path; digits=1), "s |")
+    println(
+        io, "| predicted wall at N=", d.n, " | ", round(d.critical_path; digits=1), "s |"
+    )
     println(io, "| knee | N=", d.knee, " |")
     println(
         io, "| floor unit | `", d.floor_unit, "` (", round(d.floor_time; digits=1), "s) |"
     )
+    o = d.observed
+    if o !== nothing
+        println(io, "| **observed wall** | **", round(o.wall; digits=1), "s** |")
+        println(
+            io,
+            "| effective parallelism | ",
+            round(o.effective; digits=1),
+            "x (",
+            round(o.unit_seconds; digits=1),
+            "s of units in ",
+            round(o.wall; digits=1),
+            "s) |",
+        )
+        println(io, "| start window | ", round(o.start_window; digits=1), "s |")
+    end
     if d.knee < d.n
         println(
             io,
@@ -762,6 +943,28 @@ function diagnose_report(d::Diagnosis)
             "` finishes at the same wall clock and starts ",
             d.n - d.knee,
             " fewer jobs.",
+        )
+    end
+    # The model says what the SPLIT can deliver; it assumes the shards run at the same time.
+    # When they did not, saying so is the whole point — otherwise a run that the queue made
+    # slow reads as a suite that is badly balanced, and the wrong thing gets fixed.
+    if o !== nothing && o.wall > 1.25 * d.critical_path && o.start_window > 0
+        println(
+            io,
+            "\n> The ",
+            o.nshards,
+            " shards did not overlap: `",
+            o.last_shard,
+            "` started ",
+            round(o.start_window; digits=1),
+            "s after `",
+            o.first_shard,
+            "`, so the run finished in ",
+            round(o.wall; digits=1),
+            "s against a predicted ",
+            round(d.critical_path; digits=1),
+            "s. The wall clock here is set by the queue, not by the split — a better balance ",
+            "cannot fix it, and more shards make it worse.",
         )
     end
     println(io, "\n<details><summary>Heaviest units</summary>\n")
@@ -785,6 +988,29 @@ function diagnose_report(d::Diagnosis)
             println(io, "| ", name, " | ", round(v; digits=1), " |")
         end
     end
+    if o !== nothing
+        println(io, "\n</details>\n\n<details><summary>When each shard ran</summary>\n")
+        println(io, "| shard | started | window | units | on units | fixed |")
+        println(io, "|---|--:|--:|--:|--:|--:|")
+        for w in o.windows
+            println(
+                io,
+                "| `",
+                w.shard,
+                "` | +",
+                round(w.started - o.started; digits=1),
+                "s | ",
+                round(window(w); digits=1),
+                "s | ",
+                w.nunits,
+                " | ",
+                round(w.unit_seconds; digits=1),
+                "s | ",
+                round(fixed_cost(w); digits=1),
+                "s |",
+            )
+        end
+    end
     println(io, "\n</details>")
     return String(take!(io))
 end
@@ -792,8 +1018,12 @@ end
 """
     diagnose_cli(args = ARGS) -> Int
 
-`timings.tsv [sections.tsv] [--shards N] [--fixed SECONDS]`, printing the Markdown report.
-Used by the CI collect step so every run says where the suite is badly shaped.
+`timings.tsv [sections.tsv [shards.tsv]] [--shards N] [--fixed SECONDS]`, printing the Markdown
+report. Used by the CI collect step so every run says where the suite is badly shaped.
+
+The files are positional and in that order, because each one only adds detail to the answer:
+the timings alone say how many shards the suite can use, the sections say where to cut the unit
+that limits it, and the shard windows say whether the shards actually ran at the same time.
 """
 function diagnose_cli(args=ARGS)
     files = String[]
@@ -813,7 +1043,10 @@ function diagnose_cli(args=ARGS)
         end
     end
     isempty(files) && (
-        println(stderr, "usage: timings.tsv [sections.tsv] [--shards N] [--fixed S]");
+        println(
+            stderr,
+            "usage: timings.tsv [sections.tsv [shards.tsv]] [--shards N] [--fixed S]",
+        );
         return 1
     )
     timings = load_timings(files[1])
@@ -826,7 +1059,8 @@ function diagnose_cli(args=ARGS)
     else
         Dict{String,Vector{Pair{String,Float64}}}()
     end
-    print(diagnose_report(diagnose(timings; n, fixed, sections)))
+    shards = length(files) > 2 ? load_shards(files[3]) : ShardWindow[]
+    print(diagnose_report(diagnose(timings; n, fixed, sections, shards)))
     return 0
 end
 

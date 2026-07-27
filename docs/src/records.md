@@ -18,9 +18,18 @@ The shape is a **unit → testset** hierarchy, which maps onto a document as one
 and one section per testset. `index` is the unit's position in the full suite and is the same
 in every shard, so records from separate jobs sort back into source order.
 
-Alongside it, two flat TSVs: `timings-*.tsv` (the planner's history) and `sections-*.tsv`
-(`unit`, section path, seconds — what [`TestShards.diagnose`](@ref) reads to say where to split a heavy
-unit).
+Alongside it, three flat TSVs:
+
+| file | columns | what reads it |
+|---|---|---|
+| `timings-*.tsv` | `unit`, seconds | the next run's split |
+| `sections-*.tsv` | `unit`, section path, seconds | [`TestShards.diagnose`](@ref), to say where to split a heavy unit |
+| `shard-*.tsv` | `shard`, started, finished, units, unit seconds | [`TestShards.diagnose`](@ref), to say whether the shards overlapped |
+
+One row per shard in the last of them, so concatenating the shards' files gives the timeline of
+the run — see [Balancing](balancing.md#Did-the-shards-actually-run-at-the-same-time?). The
+timestamps are epoch seconds; CI reports the *job's* start through `TESTSHARDS_JOB_START` so
+that the checkout and precompilation the Julia process never sees still fall inside the window.
 
 ## Attaching evidence
 
