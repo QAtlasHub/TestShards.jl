@@ -181,7 +181,7 @@ jobs:
             cat "${files[@]}" > lcov.info
           fi
 
-      - uses: codecov/codecov-action@v4
+      - uses: codecov/codecov-action@v7
         if: ${{ inputs.coverage }}
         continue-on-error: true          # a flaky upload must not redden a green suite
         with:
