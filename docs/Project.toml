@@ -4,4 +4,4 @@ DocumenterCitations = "daee34ce-89f3-4625-b898-19384cb65244"
 TestShards = "acceef1d-f5e0-4fe4-a546-818dc56ce7b2"
 
 [sources]
-TestShards = {path = "/home/souta/work/Vault/lib/TestShards.jl"}
+TestShards = {path = ".."}
