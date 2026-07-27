@@ -1,0 +1,79 @@
+name: AutoCompatBump
+
+# CompatHelper opens a PR that updates `Project.toml`'s `[compat]` block but
+# does *not* bump the package version.  `VersionCheck.yml` (which runs on any
+# PR touching `Project.toml`) would then fail, blocking auto-merge.
+#
+# This workflow listens for CompatHelper PR opens, patch-bumps the version,
+# and pushes the bump back to the PR branch.  The result: `VersionCheck`
+# passes, `AutoMerge.yml` queues the auto-merge, and CI alone gates the
+# merge.
+
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    if: >
+      github.event.pull_request.user.login == 'CompatHelper[bot]' ||
+      github.event.pull_request.user.login == 'github-actions[bot]'
+    steps:
+      - name: Checkout PR branch
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+          repository: ${{ github.event.pull_request.head.repo.full_name }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      - name: Detect base version
+        id: base
+        run: |
+          git fetch origin ${{ github.base_ref }} --depth=1
+          BASE=$(git show origin/${{ github.base_ref }}:Project.toml \
+            | grep '^version' | head -1 | sed 's/.*"\(.*\)"/\1/')
+          echo "version=$BASE" >> "$GITHUB_OUTPUT"
+          echo "Base version: $BASE"
+
+      - name: Detect PR-branch version
+        id: head
+        run: |
+          PR=$(grep '^version' Project.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+          echo "version=$PR" >> "$GITHUB_OUTPUT"
+          echo "PR-branch version: $PR"
+
+      - name: Bump patch if PR version not greater than base
+        env:
+          BASE: ${{ steps.base.outputs.version }}
+          PR:   ${{ steps.head.outputs.version }}
+        run: |
+          version_gt() {
+            IFS='.' read -r -a A <<< "$1"
+            IFS='.' read -r -a B <<< "$2"
+            for i in 0 1 2; do
+              a="${A[$i]:-0}"
+              b="${B[$i]:-0}"
+              if [ "$a" -gt "$b" ]; then return 0; fi
+              if [ "$a" -lt "$b" ]; then return 1; fi
+            done
+            return 1
+          }
+          if version_gt "$PR" "$BASE"; then
+            echo "✓ PR already bumped ($BASE → $PR), nothing to do."
+            exit 0
+          fi
+          IFS='.' read -r MAJ MIN PATCH <<< "$BASE"
+          NEW="$MAJ.$MIN.$((PATCH + 1))"
+          echo "Bumping $BASE → $NEW"
+          sed -i "s/^version = \".*\"/version = \"$NEW\"/" Project.toml
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Project.toml
+          git commit -m "chore(version): patch bump for compat update"
+          git push

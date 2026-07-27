@@ -1,0 +1,23 @@
+name: Release Drafter
+
+on:
+  push:
+    branches:
+      - main
+  # Required for autolabeler to act on PRs as they are opened/edited.
+  pull_request:
+    types: [opened, reopened, synchronize, edited]
+
+permissions:
+  contents: read
+
+jobs:
+  update_release_draft:
+    permissions:
+      contents: write       # release-drafter writes the draft release
+      pull-requests: write  # autolabeler writes labels back to PRs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: release-drafter/release-drafter@v7
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

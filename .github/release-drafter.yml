@@ -1,0 +1,148 @@
+name-template: 'v$RESOLVED_VERSION'
+tag-template: 'v$RESOLVED_VERSION'
+
+version-resolver:
+  major:
+    labels:
+      - 'major'
+      - 'breaking'
+  minor:
+    labels:
+      - 'minor'
+      - 'feature'
+      - 'enhancement'
+  patch:
+    labels:
+      - 'patch'
+      - 'bug'
+      - 'fix'
+      - 'documentation'
+      - 'docs'
+      - 'chore'
+      - 'refactor'
+      - 'performance'
+      - 'ci'
+      - 'test'
+  default: patch
+
+# Conventional Commits prefix から自動 label 付与。
+# PR title が `feat: ...` なら 'feature' label が付き、release-drafter
+# が categories に分類できる。`!:` または body の `BREAKING CHANGE:` は
+# 'breaking' を付ける。
+autolabeler:
+  - label: 'breaking'
+    title:
+      - '/^[a-z]+(\(.+\))?!:/i'
+    body:
+      - '/BREAKING CHANGE:/i'
+  - label: 'feature'
+    title:
+      - '/^feat(\(.+\))?:/i'
+  - label: 'bug'
+    title:
+      - '/^fix(\(.+\))?:/i'
+  - label: 'documentation'
+    title:
+      - '/^docs(\(.+\))?:/i'
+    files:
+      - 'docs/**'
+      - '**/*.md'
+  - label: 'performance'
+    title:
+      - '/^perf(\(.+\))?:/i'
+  - label: 'refactor'
+    title:
+      - '/^refactor(\(.+\))?:/i'
+  - label: 'chore'
+    title:
+      - '/^chore(\(.+\))?:/i'
+  - label: 'ci'
+    title:
+      - '/^ci(\(.+\))?:/i'
+    files:
+      - '.github/**'
+  - label: 'test'
+    title:
+      - '/^test(\(.+\))?:/i'
+    files:
+      - 'test/**'
+      - '**/test_*.jl'
+
+# 章立て: 章は対応 label の PR が 1 件もない時、release-drafter のデフォルト
+# 動作で見出しごと自動的に省略される (empty section is illegal を満たす)。
+categories:
+  - title: '⚠️ Breaking Changes'
+    labels:
+      - 'breaking'
+  - title: '🚀 Added'
+    labels:
+      - 'feature'
+      - 'enhancement'
+  - title: '🔄 Changed'
+    labels:
+      - 'refactor'
+  - title: '🐛 Fixed'
+    labels:
+      - 'bug'
+      - 'fix'
+  - title: '⚡ Performance'
+    labels:
+      - 'performance'
+  - title: '📖 Documentation'
+    labels:
+      - 'documentation'
+      - 'docs'
+  - title: '✅ Verification & Reliability'
+    labels:
+      - 'test'
+      - 'ci'
+      - 'chore'
+  - title: '⚠️ Known Limitations'
+    labels:
+      - 'known-limitation'
+
+exclude-labels:
+  - 'skip-changelog'
+  - 'wontfix'
+  - 'duplicate'
+  - 'invalid'
+
+# PR title から Conventional Commits prefix を除去して release notes に
+# 載せる際に綺麗に見せる。`feat: add foo` → `add foo`。
+replacers:
+  - search: '/^feat(\(.+\))?[!:]\s*/i'
+    replace: ''
+  - search: '/^fix(\(.+\))?[!:]\s*/i'
+    replace: ''
+  - search: '/^docs(\(.+\))?[!:]\s*/i'
+    replace: ''
+  - search: '/^chore(\(.+\))?[!:]\s*/i'
+    replace: ''
+  - search: '/^refactor(\(.+\))?[!:]\s*/i'
+    replace: ''
+  - search: '/^perf(\(.+\))?[!:]\s*/i'
+    replace: ''
+  - search: '/^ci(\(.+\))?[!:]\s*/i'
+    replace: ''
+  - search: '/^test(\(.+\))?[!:]\s*/i'
+    replace: ''
+  - search: '/^build(\(.+\))?[!:]\s*/i'
+    replace: ''
+  - search: '/^style(\(.+\))?[!:]\s*/i'
+    replace: ''
+
+change-template: '- $TITLE by @$AUTHOR in #$NUMBER'
+change-title-escapes: '\<*_&'
+
+# 唯一の固定セクションは Summary。残りの章は label-driven で、entry が
+# 0 件の章は自動的に出力されない (empty section is illegal の方針)。
+template: |
+  ## Summary
+
+  <!-- このセクションだけ自動生成では埋まりません。
+       リリース前にここに 1 段落書いてください。
+       何を出荷したか、利用者に最も伝えたいことを 3 行程度で。 -->
+
+  $CHANGES
+
+  **Full Changelog**: https://github.com/$OWNER/$REPOSITORY/compare/$PREVIOUS_TAG...v$RESOLVED_VERSION

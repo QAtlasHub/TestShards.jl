@@ -1,0 +1,24 @@
+name: Verify references
+# Every DOI / arXiv id in the bibliography must resolve to real metadata
+# (Crossref / arXiv), or this check fails. Delegated to the shared
+# QAtlasHub/doiget-citation-check action (prebuilt doiget + gate + allow-list
+# + sticky PR comment) so the whole fleet runs one identical, canonical check.
+on:
+  pull_request:
+    paths: ['docs/references.bib', 'docs/references.allow', '.github/workflows/VerifyReferences.yml']
+  push:
+    branches: [main]
+    paths: ['docs/references.bib', 'docs/references.allow']
+  workflow_dispatch:
+permissions:
+  contents: read
+  pull-requests: write
+jobs:
+  citations:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: QAtlasHub/doiget-citation-check@v1
+        with:
+          bib: docs/references.bib
+          allow: docs/references.allow

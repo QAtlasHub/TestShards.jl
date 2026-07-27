@@ -1,0 +1,67 @@
+name: 🐛 Bug Report
+description: バグや問題を報告する
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        バグ報告ありがとうございます。以下の情報を提供してください。
+
+  - type: textarea
+    id: description
+    attributes:
+      label: バグの内容
+      description: どのような問題が発生していますか？
+      placeholder: バグの内容を詳しく説明してください
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: 発生時のコード
+      description: バグを再現するためのコード例を提供してください
+      placeholder: |
+        ```julia
+        # ここにコードを貼り付けてください
+        ```
+      render: julia
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期待される動作
+      description: 本来どのように動作すべきですか？
+    validations:
+      required: false
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: 実際の動作
+      description: 実際にはどのような動作をしていますか？
+    validations: 
+      required: false
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: 環境情報
+      description: Julia のバージョンなど
+      placeholder: |
+        - Julia version: 
+        - LSystems. jl version: 
+        - OS: 
+    validations:
+      required: false
+
+  - type: textarea
+    id: additional
+    attributes: 
+      label: 追加情報
+      description: その他、参考になる情報があれば記載してください
+    validations: 
+      required: false

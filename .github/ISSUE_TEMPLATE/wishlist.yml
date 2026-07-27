@@ -1,0 +1,60 @@
+name: 💭 Wish List
+description: 将来実装したい機能のアイデア
+title: "[Wish]: "
+labels: ["wishlist", "future"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        将来的に実装したい機能のアイデアを記録します。
+
+  - type: textarea
+    id: idea
+    attributes:
+      label: アイデア
+      description: どのような機能を実装したいですか？
+      placeholder: アイデアを自由に記述してください
+    validations:
+      required: true
+
+  - type: dropdown
+    id: priority
+    attributes:
+      label: 優先度
+      description: この機能の優先度はどのくらいですか？
+      options:
+        - 高 - すぐに実装したい
+        - 中 - いずれ実装したい
+        - 低 - アイデアとして記録
+    validations:
+      required: false
+
+  - type: textarea
+    id: context
+    attributes:
+      label: 背景・コンテキスト
+      description: なぜこの機能があると良いですか？
+    validations:
+      required: false
+
+  - type: textarea
+    id: sketch
+    attributes:
+      label: スケッチ・構想
+      description: 実装のイメージやアプローチがあれば記載してください
+      placeholder: |
+        ```julia
+        # 実装のイメージ
+        # conceptual な実装だけでも可
+        ```
+      render: julia
+    validations: 
+      required: false
+
+  - type: textarea
+    id: references
+    attributes:
+      label:  参考資料
+      description: 関連する論文、リンク、他のライブラリなど
+    validations:
+      required: false
