@@ -15,6 +15,14 @@ on:
         description: 'Claim work instead of pre-assigning it — for comparing the two on this suite.'
         type: boolean
         default: false
+      shards:
+        description: 'Shard count. Fewer shards means a bigger share per shard, which is the variable that decides whether stealing is worth anything.'
+        type: string
+        default: '8'
+      stagger:
+        description: 'Delay shard sK by (K-1) x this. Makes the arrival spread controlled instead of whatever the queue happened to give.'
+        type: string
+        default: '0'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
@@ -31,7 +39,8 @@ jobs:
       contents: write
     uses: ./.github/workflows/sharded-tests.yml
     with:
-      shards: 8
+      shards: ${{ github.event_name == 'workflow_dispatch' && fromJSON(inputs.shards) || 8 }}
+      stagger-seconds: ${{ github.event_name == 'workflow_dispatch' && inputs.stagger || '0' }}
       # Off for pushes and pull requests, so the recorded history and the required checks stay
       # on one strategy. Dispatch the workflow to run the other one: the input exists because
       # "we shipped stealing" and "stealing helped this suite" are different claims, and the
