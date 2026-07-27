@@ -56,6 +56,19 @@ end
     @test own2.repo == "other/repo"
     @test own2.namespace == "ns"
     @test own2.min_seconds == 2.5
+
+    # Every attempt is bounded. A claim that never answers would otherwise hold the runner
+    # until the job's own limit and report nothing at all — strictly worse than failing.
+    @test own.timeout == 30.0
+    @test TestShards._ownership(
+        Dict(
+            "TESTSHARDS_CLAIM" => "1",
+            "TESTSHARDS_CLAIM_REPO" => "o/r",
+            "TESTSHARDS_CLAIM_TOKEN" => "t",
+            "TESTSHARDS_CLAIM_SHA" => "s",
+            "TESTSHARDS_CLAIM_TIMEOUT" => "7.5",
+        ),
+    ).timeout == 7.5
 end
 
 """
@@ -91,7 +104,7 @@ end
     # Below the threshold the claim is skipped entirely — no request is made, which is what
     # makes this safe to leave on for a thousand-unit suite. `api` points nowhere on purpose:
     # if the threshold failed to apply, the request would be attempted and this would throw.
-    c = TestShards.Claimed("http://127.0.0.1:1", "o/r", "ns", "sha", "tok", 10.0, 1)
+    c = TestShards.Claimed("http://127.0.0.1:1", "o/r", "ns", "sha", "tok", 10.0, 1, 5.0)
     ctx = bare_context(; ownership=c, timings=Dict("cheap.jl" => 0.4, "dear.jl" => 40.0))
 
     # Round-robin over the two shards: the first cheap unit falls to s1, the next to s2.
@@ -112,7 +125,7 @@ end
 @testset "an unreachable claim endpoint stops the shard instead of guessing" begin
     # Guessing "not mine" drops the unit; guessing "mine" runs it twice. Neither is reportable,
     # so the only honest outcome is to fail.
-    c = TestShards.Claimed("http://127.0.0.1:1", "o/r", "ns", "sha", "tok", 0.0, 2)
+    c = TestShards.Claimed("http://127.0.0.1:1", "o/r", "ns", "sha", "tok", 0.0, 2, 5.0)
     err = try
         TestShards._claim(c, 7)
         nothing
