@@ -316,17 +316,22 @@ jobs:
         with:
           path: parts
           pattern: testshards-out-*
-      - name: Merge into the ci-timings orphan branch (latest value wins)
+      # This run REPLACES the history rather than being merged into it. On a green run of the
+      # default branch every unit ran exactly once across the shards, so this run's timings are
+      # not an update to the suite — they ARE the suite. Merging instead keeps a row for every
+      # test file that ever existed, and a deleted unit then goes on inflating `serial`, the
+      # bin packing and the diagnosis forever, with nothing to notice it. Renaming three files
+      # is what surfaced this.
+      - name: Replace the ci-timings orphan branch with this run's measurements
         run: |
           set -euo pipefail
           mkdir -p merged
+          : > merged/previous.tsv
           if git ls-remote --exit-code --heads origin ci-timings >/dev/null 2>&1; then
             git fetch --depth=1 origin ci-timings
-            git show FETCH_HEAD:timings.tsv > merged/timings.tsv 2>/dev/null || : > merged/timings.tsv
-          else
-            : > merged/timings.tsv
+            git show FETCH_HEAD:timings.tsv > merged/previous.tsv 2>/dev/null || : > merged/previous.tsv
           fi
-          find parts -name 'timings-*.tsv' -exec cat {} + >> merged/timings.tsv || true
+          find parts -name 'timings-*.tsv' -exec cat {} + > merged/timings.tsv || : > merged/timings.tsv
           awk -F'\t' 'NF==2{t[$1]=$2} END{for (k in t) print k"\t"t[k]}' \
             merged/timings.tsv | sort > merged/final.tsv
           rows=$(wc -l < merged/final.tsv)
@@ -334,7 +339,14 @@ jobs:
             echo "::error::0 timing rows from a green run — TESTSHARDS_OUT is not reaching the sandbox, and the shards would round-robin forever without saying so."
             exit 1
           fi
-          echo "Merged $rows timing rows."
+          # Say what was dropped. Pruning is the point, but a silent prune and a shard that
+          # failed to report look identical from here.
+          dropped=$(comm -23 <(cut -f1 merged/previous.tsv | sort -u) <(cut -f1 merged/final.tsv) || true)
+          if [ -n "$dropped" ]; then
+            echo "Units gone since the last recorded run (dropped from the history):"
+            printf '  %s\n' $dropped
+          fi
+          echo "Recorded $rows timing rows."
           tmp=$(mktemp -d); cp merged/final.tsv "$tmp/timings.tsv"; cd "$tmp"
           git init -q
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
