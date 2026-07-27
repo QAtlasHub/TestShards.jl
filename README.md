@@ -16,8 +16,11 @@ took last time.
 - **Nothing to declare.** The shardable units are whatever `runtests.jl` includes — literal or
   computed. There is no naming convention to follow and no manifest to keep in sync.
 - **One merged coverage report** and **one ordered record** of what ran, per run.
-- **A diagnosis** telling you how many shards your suite can actually use, and which test to
-  split to raise that number.
+- **A diagnosis** naming what is actually limiting your suite — the queue, the per-shard setup,
+  one heavy test, or nothing — and what follows from each.
+- **A completeness check on every run**: the shards reconcile what they observed against what
+  they ran, and the run fails if a unit ran nowhere or twice.
+- **Work stealing**, optional, for when the runners do not start together.
 
 A bare `Pkg.test()` is unchanged: with no environment set, everything runs, in order.
 
@@ -59,8 +62,8 @@ jobs:
 ```
 
 That runs the shards, merges their coverage into one upload, merges their records into one
-ordered document, updates the timing history, and exposes a single `All shards passed` job to
-require in branch protection.
+ordered document, checks that every unit ran exactly once, updates the timing history, and
+exposes a single `All shards passed` job to require in branch protection.
 
 ## What to expect
 
@@ -76,18 +79,32 @@ buys nothing and pays the fixed cost again each time.
 every run:
 
 ```
-TestShards diagnosis — 11 units
-  serial total      152.1s
-  fixed per shard   60.0s
-  at N=8            106.8s wall, 632.1s runner
-  knee              N=4  (N=8 costs more for no gain)
-  floor             core/test_partition_large.jl  46.8s — no split finishes sooner than this
+TestShards diagnosis — 22 units
+  serial total      216.9s
+  fixed per shard   24.7s
+  predicted at N=8  53.7s wall, 414.6s runner
+  knee              N=10
+  floor             core/partition/n7.jl  23.1s — no split finishes sooner than this
+  observed          70.4s wall, 414.6s runner over 8 shards (8 at once)
+  effective         3.1x of 8 — start window 2.0s (s2 first, s1 last)
+  bottleneck        WorkBound — use shards: 10
 ```
 
-Read that as: this suite takes 152 s in one job; eight shards finish in 107 s but four finish
-just as fast for half the machine time; and to go below 107 s you have to split that 46.8 s
-test, not add shards. The diagnosis also names the heaviest `@testset`s *inside* that test, so
-you know where to cut.
+That is this package's own suite. Read it as: 217 s of work finished in 70 s; the eight shards
+really did run at once (a 2 s start window); nothing is in the way, so more shards would still
+help, up to ten.
+
+The last line is the one to read first. The same numbers mean opposite things at different
+scales — a 25 s per-shard cost is fatal to a two-minute suite and a rounding error on a
+forty-minute one — so the diagnosis decides which case you are in rather than leaving it to
+you. Under `FloorBound` it also names the heaviest `@testset`s *inside* the unit that is the
+floor, so you know where to cut.
+
+The wall-clock model assumes the shards run at the same time. On GitHub-hosted runners they
+often do not: the start window on this repository has ranged from 2 s to 199 s between
+consecutive pushes. That is why the shards record *when* they ran and not only for how long,
+and why `steal: true` exists — with it, a shard that starts late takes less work instead of
+delaying everyone.
 
 The first run of a fresh repository has no history and falls back to an even split — correct,
 just not yet balanced. It balances itself from the second push to the default branch.
