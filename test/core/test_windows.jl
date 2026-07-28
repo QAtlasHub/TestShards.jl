@@ -300,3 +300,86 @@ end
     # Absent or unreadable windows degrade to the model-only report rather than failing.
     @test TestShards.diagnose_cli([tsv, secs, joinpath(dir, "absent.tsv")]) == 0
 end
+
+# ── The account's budget, which is not a fact about the suite ─────────────────────────
+
+@testset "asking for more shards than the account runs is its own regime" begin
+    # A suite that could genuinely use ten shards, on an account that runs four jobs at once.
+    even = Dict("u$i" => 10.0 for i in 1:20)
+
+    unaware = TestShards.diagnose(even; n=10)
+    @test TestShards.bottleneck(unaware) isa TestShards.WorkBound
+    @test TestShards.usable_shards(unaware) == unaware.knee    # 10 shards, says the suite
+
+    capped = TestShards.diagnose(even; n=10, budget=4)
+    @test TestShards.bottleneck(capped) isa TestShards.BudgetBound
+    @test TestShards.usable_shards(capped) == 4                # 4 jobs, says the account
+    md = TestShards.remedy(capped)
+    @test occursin("6 of them queue", md)                      # names the surplus
+    @test occursin("shards: 4", md)
+
+    # Asking for exactly the budget is not budget-bound; the suite's own limits apply again.
+    @test !(
+        TestShards.bottleneck(TestShards.diagnose(even; n=4, budget=4)) isa
+        TestShards.BudgetBound
+    )
+    # And an unset budget changes nothing at all.
+    @test TestShards.bottleneck(TestShards.diagnose(even; n=10, budget=0)) isa
+        TestShards.WorkBound
+end
+
+@testset "the constraint is reported, not resolved" begin
+    # A budget is a fact about the ACCOUNT and the knee is a fact about the SUITE. Which should
+    # give way is a decision about the repository, so both stay askable and neither is quietly
+    # applied to the other.
+    even = Dict("u$i" => 10.0 for i in 1:20)
+    d = TestShards.diagnose(even; n=10, budget=4)
+
+    @test TestShards.usable_shards(TestShards.BudgetBound(), d) == 4       # the account
+    @test TestShards.usable_shards(TestShards.FloorBound(), d) == d.knee   # the suite
+    @test d.knee > 4                                                       # they disagree
+    # And the default answers under ONE policy, which is named rather than hidden.
+    @test TestShards.usable_shards(d) == 4
+
+    # Every regime that holds is reachable, so a caller can apply its own rule.
+    bs = TestShards.bottlenecks(d)
+    @test TestShards.BudgetBound() in bs
+    @test length(bs) >= 1
+    @test TestShards.bottleneck(d) === first(bs)
+    md = TestShards.diagnose_report(d)
+    @test occursin("BudgetBound", md)
+end
+
+@testset "several regimes can hold at once, and all of them are reported" begin
+    # Queue-bound AND past the knee AND over budget: three independent facts, and dropping two
+    # of them would be choosing for the reader.
+    t = Dict("u$i" => 10.0 for i in 1:8)
+    late = [
+        TestShards.ShardWindow("s1", 0.0, 100.0, 4, 40.0, 8),
+        TestShards.ShardWindow("s2", 80.0, 100.0, 4, 40.0, 8),
+    ]
+    d = TestShards.diagnose(t; n=8, budget=2, shards=late)
+    bs = TestShards.bottlenecks(d)
+    @test TestShards.QueueBound() in bs
+    @test TestShards.BudgetBound() in bs
+    @test length(bs) > 1
+    md = TestShards.diagnose_report(d)
+    @test occursin("QueueBound", md)
+    @test occursin("also", md)                 # the rest are not dropped
+    @test occursin("BudgetBound", md)
+
+    # WorkBound is the only one that means "none of the others", so it never shares.
+    clean = TestShards.diagnose(Dict("u$i" => 10.0 for i in 1:20); n=2)
+    @test TestShards.bottlenecks(clean) == [TestShards.WorkBound()]
+end
+
+@testset "the observed queue still wins over the declared budget" begin
+    # Both are true; the measured one is reported, because it happened.
+    t = Dict("u$i" => 10.0 for i in 1:8)
+    late = [
+        TestShards.ShardWindow("s1", 0.0, 100.0, 4, 40.0, 8),
+        TestShards.ShardWindow("s2", 80.0, 100.0, 4, 40.0, 8),
+    ]
+    d = TestShards.diagnose(t; n=8, budget=2, shards=late)
+    @test TestShards.bottleneck(d) isa TestShards.QueueBound
+end

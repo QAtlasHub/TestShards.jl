@@ -1604,6 +1604,7 @@ struct Diagnosis
     walls::Vector{Pair{Int,Float64}}
     split_here::Vector{Pair{String,Float64}}     # sections of the floor unit, heaviest first
     observed::Union{Nothing,Observation}
+    budget::Int                                  # concurrent jobs the account can run; 0 = unknown
 end
 
 "Load of the heaviest bin when LPT-packing `timings` into `n` shards."
@@ -1634,6 +1635,7 @@ function diagnose(
     fixed::Real=0.0,
     sections::AbstractDict=Dict{String,Vector{Pair{String,Float64}}}(),
     shards::AbstractVector{ShardWindow}=ShardWindow[],
+    budget::Integer=0,
 )
     isempty(timings) &&
         throw(ArgumentError("TestShards.diagnose: the timing history is empty"))
@@ -1666,6 +1668,7 @@ function diagnose(
         walls,
         secs,
         observed,
+        max(Int(budget), 0),
     )
 end
 
@@ -1714,6 +1717,22 @@ two — `split_here` names where.
 struct FloorBound <: Bottleneck end
 
 """
+    BudgetBound <: Bottleneck
+
+The split would use more shards than the account can run at once, so the surplus queues behind
+the first `budget` of them instead of adding parallelism.
+
+Shard counts are chosen per repository; hosted runners are budgeted per **organisation**. Every
+other regime here is a fact about the suite, and this one is not a fact about the suite at all —
+it is why a knee of ten is the wrong number to act on when eight jobs is what the account can
+actually deliver. Measured on QAtlasHub: two repositories, sixteen shards and eight, 91% of the
+org's CI on a busy day, and a peak of 27 concurrent jobs between them.
+
+`budget` has to be told to [`diagnose`](@ref); nothing in a test run can observe it.
+"""
+struct BudgetBound <: Bottleneck end
+
+"""
     WorkBound <: Bottleneck
 
 Nothing is in the way: the work still divides, and more shards would still make the run finish
@@ -1739,6 +1758,10 @@ chance to matter — so there is no point reporting the floor at it.
    single unit is what remains.
 4. [`WorkBound`](@ref) — otherwise.
 
+[`BudgetBound`](@ref) sits between the first two: it is the only one that is not a fact about
+the suite, and like the queue it invalidates what follows, because shards that queued cannot
+tell you whether the split was good.
+
 The queue test is **measured, not modelled**, and it used to be the other way round: "the
 observed wall clock is well above the predicted one". That reads as a queue problem and is not
 one. `critical_path` is built on `fixed`, and `fixed` is a lower bound — the shard windows
@@ -1751,14 +1774,47 @@ most 2s of.
 So the question is asked directly. If the last shard started 2s after the first, the queue did
 not set a 70s wall clock, whatever the model expected.
 """
-function bottleneck(d::Diagnosis)
+bottleneck(d::Diagnosis) = first(bottlenecks(d))
+
+"""
+    bottlenecks(d::Diagnosis) -> Vector{Bottleneck}
+
+**Every** regime whose condition holds, in the order [`bottleneck`](@ref) tests them.
+
+More than one is usually true. A run can be queue-bound, past its knee, and asking for more
+shards than the account runs, all at once — those are three independent facts about it.
+[`bottleneck`](@ref) returns the first, and *which one comes first is a policy, not a
+measurement*. This is the set it was chosen from.
+
+Nothing here is hidden behind that choice. [`remedy`](@ref) and [`usable_shards`](@ref)
+dispatch on any [`Bottleneck`](@ref), so a caller that wants a different rule writes it:
+
+```julia
+bs = TestShards.bottlenecks(d)
+# "tell me what the SUITE says, whatever the account can supply"
+TestShards.usable_shards(TestShards.FloorBound(), d)
+# "I care about the account first"
+TestShards.BudgetBound() in bs && TestShards.remedy(TestShards.BudgetBound(), d)
+```
+
+The default order is defended in [`bottleneck`](@ref). It is a reasonable rule and it is not
+the only one, which is why the alternatives stay reachable rather than being resolved away.
+"""
+function bottlenecks(d::Diagnosis)
+    found = Bottleneck[]
     o = d.observed
     # A quarter of the run spent waiting for the last shard to arrive. Below that, whatever
     # else is wrong, it is not the queue.
-    o !== nothing && o.wall > 0 && o.start_window > 0.25 * o.wall && return QueueBound()
-    d.fixed > _max_bin_at(d, d.n) && return FixedCostBound()
-    d.knee <= d.n && return FloorBound()
-    return WorkBound()
+    o !== nothing &&
+        o.wall > 0 &&
+        o.start_window > 0.25 * o.wall &&
+        push!(found, QueueBound())
+    # Declared rather than observed, so it only appears when someone said so.
+    0 < d.budget < d.n && push!(found, BudgetBound())
+    d.fixed > _max_bin_at(d, d.n) && push!(found, FixedCostBound())
+    d.knee <= d.n && push!(found, FloorBound())
+    isempty(found) && push!(found, WorkBound())
+    return found
 end
 
 "The heaviest bin at `n`, recovered from the wall curve so the timings need not be kept."
@@ -1769,13 +1825,22 @@ end
 """
     usable_shards(d::Diagnosis) -> Int
 
-How many shards are worth starting, which is not always the knee.
+How many shards are worth starting under the regime [`bottleneck`](@ref) selected — which is
+not always the knee, and is not always what you want asked.
 
-Under [`QueueBound`](@ref) it is the number of runners the scheduler actually granted at once:
-requesting more produced jobs that queued rather than parallelism. Otherwise it is the knee.
+Under [`QueueBound`](@ref) it is the number of runners the scheduler actually granted at once;
+under [`BudgetBound`](@ref) it is the account's limit; otherwise it is the knee.
+
+**It answers one question under one policy.** Call it with a regime to ask a different one —
+`usable_shards(FloorBound(), d)` for what the suite could use regardless of what the account
+supplies, `usable_shards(BudgetBound(), d)` for the reverse. [`bottlenecks`](@ref) says which
+are true at once, and this deliberately does not reconcile them: the budget is a constraint on
+the account, the knee is a property of the suite, and which of the two should give way is a
+decision about the repository that the diagnosis is in no position to make.
 """
 usable_shards(d::Diagnosis) = usable_shards(bottleneck(d), d)
 usable_shards(::Bottleneck, d::Diagnosis) = d.knee
+usable_shards(::BudgetBound, d::Diagnosis) = d.budget
 function usable_shards(::QueueBound, d::Diagnosis)
     o = d.observed
     return o === nothing ? d.knee : clamp(o.peak, 1, d.knee)
@@ -1851,6 +1916,23 @@ function remedy(::FloorBound, d::Diagnosis)
     )
 end
 
+function remedy(::BudgetBound, d::Diagnosis)
+    return string(
+        "`shards: ",
+        d.n,
+        "` asks for more than the ",
+        d.budget,
+        " concurrent jobs this account runs, so ",
+        d.n - d.budget,
+        " of them queue behind the rest and add no parallelism — they only add ",
+        d.n - d.budget,
+        " more fixed costs, and take that capacity from whatever else the organisation is ",
+        "running. Use `shards: ",
+        usable_shards(d),
+        "`, or move this repository to a runner pool with its own budget.",
+    )
+end
+
 function remedy(::WorkBound, d::Diagnosis)
     return string(
         "The work still divides: the knee is at N=",
@@ -1874,6 +1956,7 @@ function Base.show(io::IO, ::MIME"text/plain", d::Diagnosis)
         "s runner",
     )
     row("knee", "N=", d.knee, d.knee < d.n ? "  (N=$(d.n) costs more for no gain)" : "")
+    d.budget > 0 && row("account budget", d.budget, " concurrent jobs")
     row(
         "floor",
         d.floor_unit,
@@ -1908,7 +1991,9 @@ function Base.show(io::IO, ::MIME"text/plain", d::Diagnosis)
             " last)",
         )
     end
-    row("bottleneck", nameof(typeof(bottleneck(d))), " — use shards: ", usable_shards(d))
+    bs = bottlenecks(d)
+    also = length(bs) > 1 ? "  (also " * join(nameof.(typeof.(bs[2:end])), ", ") * ")" : ""
+    row("bottleneck", nameof(typeof(first(bs))), " — use shards: ", usable_shards(d), also)
     println(io, "\n  heaviest units")
     for (k, v) in first(d.units, min(5, length(d.units)))
         println(io, "    ", rpad(round(v; digits=1), 8), k)
@@ -1938,6 +2023,7 @@ function diagnose_report(d::Diagnosis)
         io, "| predicted wall at N=", d.n, " | ", round(d.critical_path; digits=1), "s |"
     )
     println(io, "| knee | N=", d.knee, " |")
+    d.budget > 0 && println(io, "| account runs at once | ", d.budget, " jobs |")
     println(
         io, "| floor unit | `", d.floor_unit, "` (", round(d.floor_time; digits=1), "s) |"
     )
@@ -1968,7 +2054,14 @@ function diagnose_report(d::Diagnosis)
     # One sentence, chosen by dispatch on what is actually limiting this suite. The four
     # regimes want opposite actions — split the floor unit, or stop splitting — so leaving the
     # reader to pick from a list of true statements is how the wrong one gets acted on.
-    println(io, "\n> **", nameof(typeof(bottleneck(d))), ".** ", remedy(d))
+    # Every regime that holds, not only the one the default policy ranks first. Several are
+    # usually true, they want different things, and which to act on is a decision about this
+    # repository — reporting one and dropping the rest would be making it here.
+    for (i, b) in enumerate(bottlenecks(d))
+        println(
+            io, "\n> ", i == 1 ? "**" : "*also* **", nameof(typeof(b)), ".** ", remedy(b, d)
+        )
+    end
     println(io, "\n<details><summary>Heaviest units</summary>\n")
     println(io, "| unit | seconds | share |\n|---|--:|--:|")
     for (k, v) in first(d.units, min(10, length(d.units)))
@@ -2020,8 +2113,8 @@ end
 """
     diagnose_cli(args = ARGS) -> Int
 
-`timings.tsv [sections.tsv [shards.tsv]] [--shards N] [--fixed SECONDS] [--ends FILE]`,
-printing the Markdown report. Used by the CI collect step so every run says where the suite is badly shaped.
+`timings.tsv [sections.tsv [shards.tsv]] [--shards N] [--fixed SECONDS] [--ends FILE]
+[--budget JOBS]`, printing the Markdown report. Used by the CI collect step so every run says where the suite is badly shaped.
 
 The files are positional and in that order, because each one only adds detail to the answer:
 the timings alone say how many shards the suite can use, the sections say where to cut the unit
@@ -2029,7 +2122,7 @@ that limits it, and the shard windows say whether the shards actually ran at the
 """
 function diagnose_cli(args=ARGS)
     files = String[]
-    n, fixed, ends = 8, 0.0, ""
+    n, fixed, ends, budget = 8, 0.0, "", 0
     i = 1
     while i <= length(args)
         a = args[i]
@@ -2042,6 +2135,9 @@ function diagnose_cli(args=ARGS)
         elseif a == "--ends" && i < length(args)
             ends = args[i + 1]
             i += 2
+        elseif a == "--budget" && i < length(args)
+            budget = something(tryparse(Int, args[i + 1]), 0)
+            i += 2
         else
             push!(files, a)
             i += 1
@@ -2050,7 +2146,8 @@ function diagnose_cli(args=ARGS)
     isempty(files) && (
         println(
             stderr,
-            "usage: timings.tsv [sections.tsv [shards.tsv]] [--shards N] [--fixed S] [--ends F]",
+            "usage: timings.tsv [sections.tsv [shards.tsv]] [--shards N] [--fixed S] [--ends F] " *
+            "[--budget J]",
         );
         return 1
     )
@@ -2065,7 +2162,7 @@ function diagnose_cli(args=ARGS)
         Dict{String,Vector{Pair{String,Float64}}}()
     end
     shards = length(files) > 2 ? load_shards(files[3]; ends) : ShardWindow[]
-    print(diagnose_report(diagnose(timings; n, fixed, sections, shards)))
+    print(diagnose_report(diagnose(timings; n, fixed, sections, shards, budget)))
     return 0
 end
 
