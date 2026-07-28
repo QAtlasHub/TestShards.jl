@@ -160,3 +160,64 @@ end
     @test TestShards.merge_lcov_cli([out]) == 1                       # too few arguments
     @test TestShards.merge_lcov_cli([out, joinpath(d, "absent")]) == 1  # nothing usable IS an error
 end
+
+# ── Raw counters, restored from the shards ────────────────────────────────────────────
+
+@testset "counters from different shards cannot overwrite each other" begin
+    d = mktempdir()
+    parts = joinpath(d, "parts")
+    # Two shards on different machines, and the SAME pid. Without the shard label one of these
+    # silently replaces the other, and a whole shard's coverage disappears with nothing failing.
+    for sid in ("s1", "s4")
+        p = joinpath(parts, "testshards-coverage-$sid", "src")
+        mkpath(p)
+        write(
+            joinpath(p, "M.jl.1234.cov"),
+            "        1
+",
+        )
+        write(
+            joinpath(p, "M.jl.9.cov"),
+            "        2
+",
+        )
+    end
+    dest = joinpath(d, "repo")
+    mkpath(dest)
+
+    written = TestShards.restore_counters(parts, dest)
+    @test length(written) == 4                       # nothing overwritten
+    names = sort(basename.(written))
+    @test names ==
+        ["M.jl.1234-s1.cov", "M.jl.1234-s4.cov", "M.jl.9-s1.cov", "M.jl.9-s4.cov"]
+    # The shard label goes where CoverageTools' glob still matches it.
+    @test all(startswith(n, "M.jl.") && endswith(n, ".cov") for n in names)
+    # And they land beside the source they belong to, not flattened together.
+    @test all(dirname(w) == joinpath(dest, "src") for w in written)
+end
+
+@testset "nested source directories keep their shape" begin
+    d = mktempdir()
+    p = joinpath(d, "parts", "testshards-coverage-s2", "src", "solver", "deep")
+    mkpath(p)
+    write(
+        joinpath(p, "K.jl.7.cov"),
+        "        1
+",
+    )
+    dest = joinpath(d, "repo")
+    w = only(TestShards.restore_counters(joinpath(d, "parts"), dest))
+    @test w == joinpath(dest, "src", "solver", "deep", "K.jl.7-s2.cov")
+    @test isfile(w)
+end
+
+@testset "restoring nothing is not an error here, but it is visible" begin
+    d = mktempdir()
+    @test isempty(TestShards.restore_counters(joinpath(d, "absent")))
+    mkpath(joinpath(d, "parts", "testshards-records"))    # not a coverage artifact
+    mkpath(joinpath(d, "parts", "testshards-coverage-s1"))  # a coverage one, but empty
+    @test isempty(TestShards.restore_counters(joinpath(d, "parts"), d))
+    # A directory that is not a shard artifact contributes nothing rather than throwing.
+    @test TestShards._counter_shard("testshards-records") == ""
+    @test TestShards._counter_shard("testshards-coverage-s12") == "s12"
+end

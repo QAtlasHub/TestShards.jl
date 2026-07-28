@@ -203,29 +203,33 @@ jobs:
           TESTSHARDS_CLAIM_SHA: ${{ github.sha }}
           TESTSHARDS_CLAIM_MIN: ${{ inputs.steal-min-seconds }}
 
-      - uses: julia-actions/julia-processcoverage@v1
+      # The RAW counters, not a processed report. Converting them is identical work on every
+      # shard — spin up a temp environment, resolve CoverageTools, convert this shard's files —
+      # and `collect` merges the results anyway, so doing it here does it N times for one
+      # answer. Measured on this repository it cost 3-25s per shard, the variance being a 20s
+      # JuliaSyntax precompile that some runners accepted from the depot cache and others did
+      # not. Doing it once makes the reason moot.
+      #
+      # `cp --parents` keeps each file's path, so the artifact has a fixed root whatever a
+      # given shard happened to touch. Nothing here knows the naming convention: that lives in
+      # `TestShards.restore_counters`, where a test can reach it.
+      - name: Collect this shard's raw coverage counters
         if: ${{ inputs.coverage }}
-      - name: Upload this shard's coverage
+        run: |
+          set -euo pipefail
+          mkdir -p .ts-cov
+          n=$(find . -name '*.cov' -not -path './.ts-cov/*' -exec cp --parents {} .ts-cov/ \; -print | wc -l)
+          echo "Captured $n coverage files."
+          [ "$n" -gt 0 ] || echo "::warning::no .cov files — was the suite run with coverage on?"
+
+      - name: Upload this shard's coverage counters
         if: ${{ inputs.coverage }}
         uses: actions/upload-artifact@v4
         with:
           name: testshards-coverage-${{ matrix.sid }}
-          path: lcov.info
+          path: .ts-cov
           retention-days: 1
           if-no-files-found: error
-
-      # After the work that follows the tests — processing coverage above is the big one — and
-      # before the upload that carries it away. A shard cannot write this from inside Julia: by
-      # the time the job ends its test process is long gone. Everything after this line (the
-      # two uploads, the cache save) is still missed, and that is seconds rather than the ~25s
-      # this recovers.
-      - name: Stamp when this shard's job finished
-        if: always()
-        run: |
-          set -euo pipefail
-          out="${{ github.workspace }}/${{ inputs.test-root }}/.ci-out"
-          mkdir -p "$out"
-          printf '%s\t%s\n' "${{ matrix.sid }}" "$(date +%s)" > "$out/ended-${{ matrix.sid }}.tsv"
 
       - name: Upload this shard's records and timings
         if: always()
@@ -278,23 +282,36 @@ jobs:
             Pkg.add(; eval(Meta.parse("(" * ENV["SPEC"] * ",)"))...)
             using TestShards' # precompile HERE, not in the middle of writing a report
 
-      - name: Merge every shard's coverage into one report
+      # ONCE, here, rather than N times in the shards. The counters arrive flattened and
+      # shard-suffixed; putting them back where their sources are is what lets CoverageTools
+      # find them, and it globs `<file>.*.cov` so the suffix is free.
+      # ONCE, here, rather than N times in the shards.
+      - name: Convert every shard's counters into one report
         if: ${{ inputs.coverage }}
         run: |
           set -euo pipefail
-          mapfile -t files < <(find parts -name 'lcov.info' | sort)
-          if [ "${#files[@]}" -eq 0 ]; then
-            echo "::error::no coverage artifacts — did every shard die before processcoverage?"
-            exit 1
-          fi
-          echo "Merging ${#files[@]} shard reports."
-          # The merge is a UNION, not a sum: every shard loads the whole package but runs
-          # part of the suite, so a line missed by seven shards and hit by the eighth is
-          # covered. See `TestShards.merge_lcov`, which is where this is tested.
           julia --startup-file=no --project="$RUNNER_TEMP/tsenv" -e '
             using TestShards
-            exit(TestShards.merge_lcov_cli(ARGS))' lcov.info "${files[@]}" \
-            >> "$GITHUB_STEP_SUMMARY"
+            files = TestShards.restore_counters("parts", ".")
+            isempty(files) && error("no coverage counters — did every shard die before uploading?")
+            println("Restored ", length(files), " counter files from the shards.")'
+          julia --startup-file=no --project=/dev/null -e '
+            using Pkg
+            Pkg.activate(joinpath(ENV["RUNNER_TEMP"], "covenv"))
+            Pkg.add("CoverageTools")
+            using CoverageTools
+            fc = mapreduce(process_folder, merge_coverage_counts,
+                           filter(isdir, ["src", "ext"]); init=FileCoverage[])
+            LCOV.writefile("lcov.info", fc)
+            covered, total = get_summary(fc)
+            pct = total > 0 ? round(100 * covered / total; digits=1) : 0.0
+            open(ENV["GITHUB_STEP_SUMMARY"], "a") do io
+                println(io, "### Coverage\n")
+                println(io, "| | |\n|---|--:|")
+                println(io, "| coverage | ", pct, "% (", covered, "/", total, " lines) |")
+                println(io, "| source files | ", length(fc), " |")
+            end
+            println("Coverage ", pct, "% (", covered, "/", total, " lines) over ", length(fc), " files.")'
 
       - uses: codecov/codecov-action@v7
         if: ${{ inputs.coverage }}
