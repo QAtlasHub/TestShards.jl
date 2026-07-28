@@ -71,6 +71,14 @@ on:
           gate below exists because a shard that dies after claiming leaves a hole.
         type: boolean
         default: false
+      stagger-seconds:
+        description: >
+          Delay shard sK by (K-1) x this before it starts, so the arrival spread becomes a
+          CONTROLLED variable. The real queue cannot be controlled, and comparing ownership
+          strategies across runs that drew different spreads compares the queue, not the
+          strategies. Zero in normal use.
+        type: string
+        default: '0'
       steal-min-seconds:
         description: >
           Units cheaper than this stay statically assigned when stealing: below it a round trip
@@ -126,6 +134,20 @@ jobs:
       matrix:
         sid: ${{ fromJSON(needs.labels.outputs.matrix) }}
     steps:
+      # Before everything, including the start stamp: the point is to look exactly like a shard
+      # the scheduler handed over late, so the window has to start after the wait, not before.
+      - name: Simulate a late arrival
+        if: ${{ inputs.stagger-seconds != '0' }}
+        run: |
+          set -euo pipefail
+          idx=${SID#s}
+          secs=$(( (idx - 1) * STAGGER ))
+          echo "Shard $SID waiting ${secs}s to simulate arriving ${secs}s into the run."
+          sleep "$secs"
+        env:
+          SID: ${{ matrix.sid }}
+          STAGGER: ${{ inputs.stagger-seconds }}
+
       # FIRST, before the checkout. Julia cannot see the checkout, the depot restore or the
       # precompilation that precede it, and those are most of what a shard pays — so a shard
       # window measured from inside the process would report a fixed cost several times too
