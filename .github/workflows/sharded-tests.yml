@@ -218,7 +218,13 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p .ts-cov
-          n=$(find . -name '*.cov' -not -path './.ts-cov/*' -exec cp --parents {} .ts-cov/ \; -print | wc -l)
+          n=0
+          while IFS= read -r f; do
+            rel=${f#./}
+            mkdir -p ".ts-cov/$(dirname "$rel")"
+            cp "$f" ".ts-cov/$rel"
+            n=$((n + 1))
+          done < <(find . -name '*.cov' -not -path './.ts-cov/*')
           echo "Captured $n coverage files."
           [ "$n" -gt 0 ] || echo "::warning::no .cov files — was the suite run with coverage on?"
 
@@ -230,6 +236,9 @@ jobs:
           path: .ts-cov
           retention-days: 1
           if-no-files-found: error
+          # `.ts-cov` is hidden, and v4 drops hidden files unless told otherwise — it captured
+          # 12 counters and uploaded none. The records upload below already knew this.
+          include-hidden-files: true
 
       - name: Upload this shard's records and timings
         if: always()
