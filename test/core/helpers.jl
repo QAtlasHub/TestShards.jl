@@ -3,8 +3,13 @@
 # exposes — see the README — so this suite must not have it either.
 module TSHelpers
 
+using Test
+using TestShards
+
 export make_suite, run_suite, unit_keys
 export shared_suite, whole_units, partition_check, shard_runs_clean
+export bare_context, shard_window, lcov_trace
+export StubSet, stub_fold, with_provider
 
 const PROJ = dirname(Base.active_project())
 
@@ -139,6 +144,122 @@ function shard_runs_clean(n::Integer, k::Integer)
         shared_suite(); env=Dict("TESTSHARDS_ID" => "s$k", "TESTSHARDS_N" => "$n")
     )
     return ok
+end
+
+# ── Fixtures the tests build directly ─────────────────────────────────────────────────
+
+"""
+    bare_context(; shard, nshards, ownership, timings, root) -> TestShards.ShardContext
+
+A context built directly, touching no globals.
+
+`TestShards._begin` is the obvious way to get one and is the wrong way: it installs the context
+in `TestShards.CURRENT`, so calling it from inside a `@shard` block — which is where this suite
+runs — replaces that block's own context, and every later `include` dies with "not inside a
+@shard block". The driver under test is the driver running the test.
+
+Keyword arguments rather than the struct's field order, which changed three times in a day and
+took every test that spelled it out with it. Two files had grown their own copy of this.
+"""
+function bare_context(;
+    shard="s1",
+    nshards=2,
+    ownership=TestShards.Assigned(),
+    timings=Dict{String,Float64}(),
+    root=mktempdir(),
+)
+    return TestShards.ShardContext(
+        root,
+        shard,
+        nothing,
+        nshards,
+        Dict{String,String}(),
+        0,
+        0,
+        0,
+        time(),
+        ownership,
+        timings,
+        Tuple{Int,String}[],
+        TestShards.UnitRecord[],
+        IdDict{Any,Dict{String,Any}}(),
+    )
+end
+
+"A `ShardWindow` with the parts a test does not care about filled in."
+function shard_window(shard, nunits, seen; started=0.0, finished=1.0, unit_seconds=1.0)
+    return TestShards.ShardWindow(shard, started, finished, nunits, unit_seconds, seen)
+end
+
+"Write a minimal lcov tracefile: `src => Dict(line => hits)`."
+function lcov_trace(path, files)
+    open(path, "w") do io
+        for (src, lines) in files
+            println(io, "SF:", src)
+            for (n, c) in sort(collect(lines); by=first)
+                println(io, "DA:", n, ",", c)
+            end
+            println(io, "LF:", length(lines))
+            println(io, "LH:", count(>(0), values(lines)))
+            println(io, "end_of_record")
+        end
+    end
+    return path
+end
+
+# ── A foreign testset, for the unit-testset provider seam ─────────────────────────────
+
+"""
+Records nothing but its own tally, exactly as an outside tool's testset would, and is
+deliberately NOT a `DefaultTestSet`.
+"""
+mutable struct StubSet <: Test.AbstractTestSet
+    description::String
+    npass::Int
+    nfail::Int
+    nerror::Int
+    nbroken::Int
+    closed::Bool
+end
+StubSet(desc::AbstractString) = StubSet(String(desc), 0, 0, 0, 0, false)
+
+function Test.record(ts::StubSet, res)
+    res isa Test.Pass && (ts.npass += 1)
+    res isa Test.Fail && (ts.nfail += 1)
+    res isa Test.Error && (ts.nerror += 1)
+    res isa Test.Broken && (ts.nbroken += 1)
+    return res
+end
+Test.finish(ts::StubSet) = ts
+
+"The fold a provider supplies: a foreign testset reduced to the counts a record needs."
+function stub_fold(ts::StubSet)
+    return (;
+        name=ts.description,
+        duration=0.5,
+        npass=ts.npass,
+        nfail=ts.nfail,
+        nerror=ts.nerror,
+        nbroken=ts.nbroken,
+    )
+end
+
+"""
+Register a provider, run `f`, and put the global back whatever happens.
+
+Registration mutates a package global, so a provider left behind would change the testset type
+of every later unit in this suite — including in another file, which is precisely the kind of
+cross-unit coupling this package exists to make impossible.
+"""
+function with_provider(f; name="stub", open, close=(_) -> nothing, fold=stub_fold)
+    saved = TestShards.UNIT_PROVIDER[]
+    TestShards.UNIT_PROVIDER[] = nothing
+    try
+        TestShards.register_unit_provider!(; name=name, open=open, close=close, fold=fold)
+        return f()
+    finally
+        TestShards.UNIT_PROVIDER[] = saved
+    end
 end
 
 end # module TSHelpers

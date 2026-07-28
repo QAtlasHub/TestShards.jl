@@ -71,35 +71,6 @@ end
     ).timeout == 7.5
 end
 
-"""
-A context built by hand, touching no globals.
-
-`_begin` is the obvious way to get one and is the wrong way: it installs the context in
-`TestShards.CURRENT`, so calling it from inside a `@shard` block — which is where this suite
-runs — replaces that block's own context with a fixture, and every later `include` dies with
-"not inside a @shard block". The driver under test is the driver running the test.
-"""
-function bare_context(;
-    shard="s1", nshards=2, ownership=TestShards.Assigned(), timings=Dict{String,Float64}()
-)
-    return TestShards.ShardContext(
-        mktempdir(),
-        shard,
-        nothing,
-        nshards,
-        Dict{String,String}(),
-        0,
-        0,
-        0,
-        time(),
-        ownership,
-        timings,
-        Tuple{Int,String}[],
-        TestShards.UnitRecord[],
-        IdDict{Any,Dict{String,Any}}(),
-    )
-end
-
 @testset "a cheap unit is not worth a round trip, so it stays assigned" begin
     # Below the threshold the claim is skipped entirely — no request is made, which is what
     # makes this safe to leave on for a thousand-unit suite. `api` points nowhere on purpose:
@@ -138,11 +109,9 @@ end
 
 # ── Completeness ──────────────────────────────────────────────────────────────────────
 
-w(shard, nunits, seen) = TestShards.ShardWindow(shard, 0.0, 1.0, nunits, 1.0, seen)
-
 @testset "a run that covered its suite says so" begin
     c = TestShards.completeness(
-        [w("s1", 2, 4), w("s2", 2, 4)],
+        [shard_window("s1", 2, 4), shard_window("s2", 2, 4)],
         [(1, "s1", "a.jl"), (3, "s1", "c.jl"), (2, "s2", "b.jl"), (4, "s2", "d.jl")],
     )
     @test TestShards.complete(c)
@@ -155,7 +124,7 @@ end
 @testset "a unit claimed by a shard that then died is a HOLE, and fails the run" begin
     # The failure claiming introduces: position 3 was observed by everyone and run by nobody.
     c = TestShards.completeness(
-        [w("s1", 2, 4), w("s2", 1, 4)],
+        [shard_window("s1", 2, 4), shard_window("s2", 1, 4)],
         [(1, "s1", "a.jl"), (2, "s1", "b.jl"), (4, "s2", "d.jl")],
     )
     @test !TestShards.complete(c)
@@ -167,7 +136,7 @@ end
 
 @testset "two shards that both believed they owned a unit is also a failure" begin
     c = TestShards.completeness(
-        [w("s1", 2, 2), w("s2", 1, 2)],
+        [shard_window("s1", 2, 2), shard_window("s2", 1, 2)],
         [(1, "s1", "a.jl"), (2, "s1", "b.jl"), (2, "s2", "b.jl")],
     )
     @test !TestShards.complete(c)
@@ -180,7 +149,8 @@ end
     # Different observed counts mean they did not run the same runtests.jl, so `index` does not
     # identify the same unit across shards and the merged records are not one document.
     c = TestShards.completeness(
-        [w("s1", 1, 4), w("s2", 1, 9)], [(1, "s1", "a.jl"), (2, "s2", "b.jl")]
+        [shard_window("s1", 1, 4), shard_window("s2", 1, 9)],
+        [(1, "s1", "a.jl"), (2, "s2", "b.jl")],
     )
     @test !TestShards.complete(c)
     @test c.disagreed
@@ -213,7 +183,7 @@ end
         append!(ran, TestShards.load_ran(joinpath(out, "ran-s$k.tsv")))
     end
     @test length(unique(seen)) == 1               # every shard saw the same sequence
-    c = TestShards.completeness([w("s$k", 0, seen[k]) for k in 1:3], ran)
+    c = TestShards.completeness([shard_window("s$k", 0, seen[k]) for k in 1:3], ran)
     @test TestShards.complete(c)                  # …and between them ran all of it
     @test c.observed == first(seen)
 end
