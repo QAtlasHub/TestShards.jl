@@ -172,6 +172,42 @@ different scales**. A 49 s per-shard cost and a 130 s start window are fatal to 
 and a rounding error on a 40-minute one. Deciding which case you are in is a fact about your
 repository, and every consumer working it out again by hand is how the wrong one gets acted on.
 
+## Precompiling once instead of once per shard
+
+Every shard precompiles the package under test for itself, and the depot cache cannot prevent
+it: the package changes with every commit while its dependencies do not, and the test step runs
+under `--check-bounds=yes` and `--code-coverage`, which is a **different precompile
+configuration** from the one `julia-buildpkg` produced. Measured on QAtlas.jl, that is ~219 s
+inside *every one* of sixteen shards — about 3,500 runner-seconds a run for one answer.
+
+`prebuild: true` builds it once, in its own job, and hands the result to the shards. Measured
+here, a shard that adopts the shared cache prints no precompile line at all, and adopting it
+costs 1.8 s.
+
+What it promises is exactly that: the package is precompiled once, and the shards adopt the
+result instead of repeating it. That is verified — a shard which adopts the cache prints no
+precompile line at all, where the same shard without it prints one.
+
+Whether that is *worth* it is arithmetic over three numbers, and they are yours rather than
+this package's:
+
+```
+saved   N × (precompilation per shard)
+cost    (the build job) + N × (download and untar)
+```
+
+Measured here, for reference at each end. On this package — one dependency, 1–4 s of
+precompilation — the build job costs more than it saves, 581 → 614 total runner-seconds over
+four shards. At QAtlas.jl's numbers, ~219 s inside each of sixteen shards, the same arithmetic
+returns about 3,200 runner-seconds a run. Adoption itself was 1.8 s per shard on a 4.4 MB
+cache.
+
+The build is serialised in front of the shards, so this buys runner time and spends a little
+wall clock. Which of the two you would rather have is a fact about your **account** — see the
+budget discussion above: runner-seconds are capacity shared with every other repository in the
+organisation — so it is an input rather than a default, and the numbers to set it with come out
+of the diagnosis.
+
 ## Sharing the depot cache
 
 All shards instantiate the same project, so they should share one dependency cache, and the

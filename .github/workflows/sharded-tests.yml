@@ -85,6 +85,17 @@ on:
           costs more than the unit does. Needs a timing history to know which those are.
         type: string
         default: '0'
+      prebuild:
+        description: >
+          Precompile ONCE in its own job and hand the result to the shards, instead of every
+          shard precompiling the same commit for itself. Measured on QAtlas.jl, the package
+          under test costs ~219s of precompilation inside EVERY shard's test step — 16 shards,
+          ~3,400 runner-seconds a run, for one answer.
+          It is a TRADE, not a win: the build is serialised in front of the shards, so it buys
+          runner time and costs a little wall clock. Off by default; which side you want is a
+          fact about your account, not about your suite.
+        type: boolean
+        default: false
       concurrency-budget:
         description: >
           How many jobs this ACCOUNT can run at once. Shard counts are chosen per repository and
@@ -134,9 +145,47 @@ jobs:
           echo "matrix=[$m]" >> "$GITHUB_OUTPUT"
           echo "Shards: [$m]"
 
+  # Precompile the package once, with the configuration the TEST step will use — that is the
+  # part the depot cache cannot carry between runs, because the package under test changes with
+  # every commit while its dependencies do not.
+  prebuild:
+    name: Precompile once
+    if: ${{ inputs.prebuild }}
+    runs-on: ${{ fromJSON(inputs.runner) }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: julia-actions/setup-julia@v3
+        with:
+          version: ${{ inputs.julia-version }}
+      - uses: julia-actions/cache@v3
+        with:
+          cache-name: testshards
+          include-matrix: 'false'
+      # The flags are the point. `julia-buildpkg` precompiles with defaults; the test step runs
+      # under --check-bounds=yes and --code-coverage, which is a DIFFERENT precompile
+      # configuration with its own cache files. Building the default one and handing it over
+      # would transfer the artefact the shards already had.
+      - name: Precompile for the test configuration
+        run: |
+          set -euo pipefail
+          julia --startup-file=no --project=. \
+            --check-bounds=yes --code-coverage=@"$GITHUB_WORKSPACE" \
+            -e 'using Pkg; Pkg.instantiate(); Pkg.precompile()'
+          tar -C "$HOME/.julia" -czf compiled.tgz compiled
+          echo "Compiled cache: $(du -h compiled.tgz | cut -f1)"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: testshards-prebuild
+          path: compiled.tgz
+          retention-days: 1
+          if-no-files-found: error
+
   test:
     name: shard ${{ matrix.sid }}
-    needs: labels
+    needs: [labels, prebuild]
+    # `prebuild` is skipped when the input is off, and a skipped dependency would skip this too.
+    if: ${{ !cancelled() && needs.labels.result == 'success' && needs.prebuild.result != 'failure' }}
     runs-on: ${{ fromJSON(inputs.runner) }}
     strategy:
       fail-fast: false
@@ -191,6 +240,20 @@ jobs:
           # Must stay false: the default serialises the whole matrix context into the key,
           # which differs per shard and would silently undo the line above.
           include-matrix: 'false'
+      # Before buildpkg, so that what it finds already precompiled it does not redo.
+      - uses: actions/download-artifact@v8
+        if: ${{ inputs.prebuild }}
+        with:
+          name: testshards-prebuild
+      - name: Adopt the precompiled cache
+        if: ${{ inputs.prebuild }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.julia"
+          tar -C "$HOME/.julia" -xzf compiled.tgz
+          rm -f compiled.tgz
+          echo "Adopted the shared compiled cache."
+
       - uses: julia-actions/julia-buildpkg@v1
 
       - name: Run shard ${{ matrix.sid }}

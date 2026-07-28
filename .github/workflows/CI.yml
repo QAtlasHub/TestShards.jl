@@ -23,6 +23,10 @@ on:
         description: 'Delay shard sK by (K-1) x this. Makes the arrival spread controlled instead of whatever the queue happened to give.'
         type: string
         default: '0'
+      prebuild:
+        description: 'Precompile once and hand it to the shards, rather than each shard doing it. Trades wall clock for runner time.'
+        type: boolean
+        default: false
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
@@ -41,6 +45,7 @@ jobs:
     with:
       shards: ${{ github.event_name == 'workflow_dispatch' && fromJSON(inputs.shards) || 8 }}
       stagger-seconds: ${{ github.event_name == 'workflow_dispatch' && inputs.stagger || '0' }}
+      prebuild: ${{ github.event_name == 'workflow_dispatch' && inputs.prebuild }}
       # Off for pushes and pull requests, so the recorded history and the required checks stay
       # on one strategy. Dispatch the workflow to run the other one: the input exists because
       # "we shipped stealing" and "stealing helped this suite" are different claims, and the
