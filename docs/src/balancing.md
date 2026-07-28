@@ -114,20 +114,34 @@ shards can this suite use".
 
 ## What is actually limiting this suite
 
-The numbers above support four different conclusions, and they want opposite actions. Rather
+The numbers above support five different conclusions, and they want opposite actions. Rather
 than leave the reader to pick, the diagnosis decides — [`TestShards.bottleneck`](@ref) returns
-one of four types and [`TestShards.remedy`](@ref) and [`TestShards.usable_shards`](@ref)
+one of five types and [`TestShards.remedy`](@ref) and [`TestShards.usable_shards`](@ref)
 dispatch on it:
 
 | regime | what it means | what to do |
 |---|---|---|
 | [`QueueBound`](@ref TestShards.QueueBound) | the shards never overlapped | fewer shards, or a pool that can start them |
+| [`BudgetBound`](@ref TestShards.BudgetBound) | more shards asked for than the account runs at once | ask for what you can get, or move to another pool |
 | [`FixedCostBound`](@ref TestShards.FixedCostBound) | a shard spends longer getting ready than testing | lower the setup, or split less |
 | [`FloorBound`](@ref TestShards.FloorBound) | the heaviest single unit is what is left | cut that unit in two |
 | [`WorkBound`](@ref TestShards.WorkBound) | nothing is in the way | more shards would still help |
 
 They are tested in that order, because fixing one is what exposes the next: a queue-bound run
-says nothing about its own balance, since the balance was never given a chance to matter.
+says nothing about its own balance, since the balance was never given a chance to matter. The
+budget comes second for the same reason — shards that queued behind the account's limit cannot
+tell you whether the split was any good.
+
+`BudgetBound` is the odd one out, and deliberately so: it is the only regime that is **not a
+fact about the suite**. Shard counts are chosen per repository; hosted runners are budgeted per
+**organisation**. Measured on QAtlasHub, two repositories running sixteen shards and eight were
+91% of the org's CI on a busy day, at a peak of 27 concurrent jobs between them — so they could
+not both run at full width, and the eleventh shard of either was queueing behind the other
+repository rather than adding parallelism.
+
+Nothing inside a test run can observe that, so it has to be told: `concurrency-budget` in the
+workflow, `budget` in [`TestShards.diagnose`](@ref). Left unset, the diagnosis behaves exactly
+as before and says nothing about it.
 
 This is a type rather than a paragraph because **the same numbers mean opposite things at
 different scales**. A 49 s per-shard cost and a 130 s start window are fatal to a 150 s suite

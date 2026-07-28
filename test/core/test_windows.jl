@@ -300,3 +300,50 @@ end
     # Absent or unreadable windows degrade to the model-only report rather than failing.
     @test TestShards.diagnose_cli([tsv, secs, joinpath(dir, "absent.tsv")]) == 0
 end
+
+# ── The account's budget, which is not a fact about the suite ─────────────────────────
+
+@testset "asking for more shards than the account runs is its own regime" begin
+    # A suite that could genuinely use ten shards, on an account that runs four jobs at once.
+    even = Dict("u$i" => 10.0 for i in 1:20)
+
+    unaware = TestShards.diagnose(even; n=10)
+    @test TestShards.bottleneck(unaware) isa TestShards.WorkBound
+    @test TestShards.usable_shards(unaware) == unaware.knee    # 10 shards, says the suite
+
+    capped = TestShards.diagnose(even; n=10, budget=4)
+    @test TestShards.bottleneck(capped) isa TestShards.BudgetBound
+    @test TestShards.usable_shards(capped) == 4                # 4 jobs, says the account
+    md = TestShards.remedy(capped)
+    @test occursin("6 of them queue", md)                      # names the surplus
+    @test occursin("shards: 4", md)
+
+    # Asking for exactly the budget is not budget-bound; the suite's own limits apply again.
+    @test !(
+        TestShards.bottleneck(TestShards.diagnose(even; n=4, budget=4)) isa
+        TestShards.BudgetBound
+    )
+    # And an unset budget changes nothing at all.
+    @test TestShards.bottleneck(TestShards.diagnose(even; n=10, budget=0)) isa
+        TestShards.WorkBound
+end
+
+@testset "a known budget also caps the recommendation in the other regimes" begin
+    # FloorBound would recommend the knee. The knee is still more than the account can run.
+    heavy = Dict("heavy" => 40.0, "a" => 5.0, "b" => 5.0, "c" => 5.0)
+    d = TestShards.diagnose(heavy; n=2, budget=1)
+    @test TestShards.usable_shards(d) <= 1
+    # Without a budget the same suite recommends its knee, whatever that is.
+    @test TestShards.usable_shards(TestShards.diagnose(heavy; n=2)) >= 1
+end
+
+@testset "the observed queue still wins over the declared budget" begin
+    # Both are true; the measured one is reported, because it happened.
+    t = Dict("u$i" => 10.0 for i in 1:8)
+    late = [
+        TestShards.ShardWindow("s1", 0.0, 100.0, 4, 40.0, 8),
+        TestShards.ShardWindow("s2", 80.0, 100.0, 4, 40.0, 8),
+    ]
+    d = TestShards.diagnose(t; n=8, budget=2, shards=late)
+    @test TestShards.bottleneck(d) isa TestShards.QueueBound
+end

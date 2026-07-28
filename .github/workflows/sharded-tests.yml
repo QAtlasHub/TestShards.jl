@@ -85,6 +85,15 @@ on:
           costs more than the unit does. Needs a timing history to know which those are.
         type: string
         default: '0'
+      concurrency-budget:
+        description: >
+          How many jobs this ACCOUNT can run at once. Shard counts are chosen per repository and
+          hosted runners are budgeted per organisation, so a knee of ten is the wrong number to
+          act on when eight is what you can actually get: the surplus queues and adds fixed
+          costs without adding parallelism. Nothing in a test run can observe this, so the
+          diagnosis only mentions it when you say so. 0 = unknown.
+        type: string
+        default: '0'
       fixed-cost-seconds:
         description: >
           Per-shard cost that does not shrink with more shards (checkout, depot restore,
@@ -392,6 +401,7 @@ jobs:
         env:
           SHARDS: ${{ inputs.shards }}
           FIXED: ${{ inputs.fixed-cost-seconds }}
+          BUDGET: ${{ inputs.concurrency-budget }}
         run: |
           set -euo pipefail
           find parts -name 'timings-*.tsv'  -exec cat {} + | sort -u > all-timings.tsv  || : > all-timings.tsv
@@ -403,7 +413,7 @@ jobs:
             exit(TestShards.diagnose_cli([
                 "all-timings.tsv", "all-sections.tsv", "all-shards.tsv",
                 "--shards", ENV["SHARDS"], "--fixed", ENV["FIXED"],
-                "--ends", "all-ended.tsv",
+                "--ends", "all-ended.tsv", "--budget", ENV["BUDGET"],
             ]))' >> "$GITHUB_STEP_SUMMARY"
 
   timings:

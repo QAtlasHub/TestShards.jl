@@ -1604,6 +1604,7 @@ struct Diagnosis
     walls::Vector{Pair{Int,Float64}}
     split_here::Vector{Pair{String,Float64}}     # sections of the floor unit, heaviest first
     observed::Union{Nothing,Observation}
+    budget::Int                                  # concurrent jobs the account can run; 0 = unknown
 end
 
 "Load of the heaviest bin when LPT-packing `timings` into `n` shards."
@@ -1634,6 +1635,7 @@ function diagnose(
     fixed::Real=0.0,
     sections::AbstractDict=Dict{String,Vector{Pair{String,Float64}}}(),
     shards::AbstractVector{ShardWindow}=ShardWindow[],
+    budget::Integer=0,
 )
     isempty(timings) &&
         throw(ArgumentError("TestShards.diagnose: the timing history is empty"))
@@ -1666,6 +1668,7 @@ function diagnose(
         walls,
         secs,
         observed,
+        max(Int(budget), 0),
     )
 end
 
@@ -1714,6 +1717,22 @@ two — `split_here` names where.
 struct FloorBound <: Bottleneck end
 
 """
+    BudgetBound <: Bottleneck
+
+The split would use more shards than the account can run at once, so the surplus queues behind
+the first `budget` of them instead of adding parallelism.
+
+Shard counts are chosen per repository; hosted runners are budgeted per **organisation**. Every
+other regime here is a fact about the suite, and this one is not a fact about the suite at all —
+it is why a knee of ten is the wrong number to act on when eight jobs is what the account can
+actually deliver. Measured on QAtlasHub: two repositories, sixteen shards and eight, 91% of the
+org's CI on a busy day, and a peak of 27 concurrent jobs between them.
+
+`budget` has to be told to [`diagnose`](@ref); nothing in a test run can observe it.
+"""
+struct BudgetBound <: Bottleneck end
+
+"""
     WorkBound <: Bottleneck
 
 Nothing is in the way: the work still divides, and more shards would still make the run finish
@@ -1739,6 +1758,10 @@ chance to matter — so there is no point reporting the floor at it.
    single unit is what remains.
 4. [`WorkBound`](@ref) — otherwise.
 
+[`BudgetBound`](@ref) sits between the first two: it is the only one that is not a fact about
+the suite, and like the queue it invalidates what follows, because shards that queued cannot
+tell you whether the split was good.
+
 The queue test is **measured, not modelled**, and it used to be the other way round: "the
 observed wall clock is well above the predicted one". That reads as a queue problem and is not
 one. `critical_path` is built on `fixed`, and `fixed` is a lower bound — the shard windows
@@ -1756,6 +1779,10 @@ function bottleneck(d::Diagnosis)
     # A quarter of the run spent waiting for the last shard to arrive. Below that, whatever
     # else is wrong, it is not the queue.
     o !== nothing && o.wall > 0 && o.start_window > 0.25 * o.wall && return QueueBound()
+    # Second for the same reason the queue is first: asking for more shards than the account
+    # runs at once means the surplus queued, and a run whose shards queued says nothing about
+    # its own balance. Declared rather than observed, so it only fires when someone said so.
+    0 < d.budget < d.n && return BudgetBound()
     d.fixed > _max_bin_at(d, d.n) && return FixedCostBound()
     d.knee <= d.n && return FloorBound()
     return WorkBound()
@@ -1775,7 +1802,10 @@ Under [`QueueBound`](@ref) it is the number of runners the scheduler actually gr
 requesting more produced jobs that queued rather than parallelism. Otherwise it is the knee.
 """
 usable_shards(d::Diagnosis) = usable_shards(bottleneck(d), d)
-usable_shards(::Bottleneck, d::Diagnosis) = d.knee
+function usable_shards(::Bottleneck, d::Diagnosis)
+    return d.budget > 0 ? min(d.knee, d.budget) : d.knee
+end
+usable_shards(::BudgetBound, d::Diagnosis) = d.budget
 function usable_shards(::QueueBound, d::Diagnosis)
     o = d.observed
     return o === nothing ? d.knee : clamp(o.peak, 1, d.knee)
@@ -1851,6 +1881,23 @@ function remedy(::FloorBound, d::Diagnosis)
     )
 end
 
+function remedy(::BudgetBound, d::Diagnosis)
+    return string(
+        "`shards: ",
+        d.n,
+        "` asks for more than the ",
+        d.budget,
+        " concurrent jobs this account runs, so ",
+        d.n - d.budget,
+        " of them queue behind the rest and add no parallelism — they only add ",
+        d.n - d.budget,
+        " more fixed costs, and take that capacity from whatever else the organisation is ",
+        "running. Use `shards: ",
+        usable_shards(d),
+        "`, or move this repository to a runner pool with its own budget.",
+    )
+end
+
 function remedy(::WorkBound, d::Diagnosis)
     return string(
         "The work still divides: the knee is at N=",
@@ -1874,6 +1921,7 @@ function Base.show(io::IO, ::MIME"text/plain", d::Diagnosis)
         "s runner",
     )
     row("knee", "N=", d.knee, d.knee < d.n ? "  (N=$(d.n) costs more for no gain)" : "")
+    d.budget > 0 && row("account budget", d.budget, " concurrent jobs")
     row(
         "floor",
         d.floor_unit,
@@ -1938,6 +1986,7 @@ function diagnose_report(d::Diagnosis)
         io, "| predicted wall at N=", d.n, " | ", round(d.critical_path; digits=1), "s |"
     )
     println(io, "| knee | N=", d.knee, " |")
+    d.budget > 0 && println(io, "| account runs at once | ", d.budget, " jobs |")
     println(
         io, "| floor unit | `", d.floor_unit, "` (", round(d.floor_time; digits=1), "s) |"
     )
@@ -2020,8 +2069,8 @@ end
 """
     diagnose_cli(args = ARGS) -> Int
 
-`timings.tsv [sections.tsv [shards.tsv]] [--shards N] [--fixed SECONDS] [--ends FILE]`,
-printing the Markdown report. Used by the CI collect step so every run says where the suite is badly shaped.
+`timings.tsv [sections.tsv [shards.tsv]] [--shards N] [--fixed SECONDS] [--ends FILE]
+[--budget JOBS]`, printing the Markdown report. Used by the CI collect step so every run says where the suite is badly shaped.
 
 The files are positional and in that order, because each one only adds detail to the answer:
 the timings alone say how many shards the suite can use, the sections say where to cut the unit
@@ -2029,7 +2078,7 @@ that limits it, and the shard windows say whether the shards actually ran at the
 """
 function diagnose_cli(args=ARGS)
     files = String[]
-    n, fixed, ends = 8, 0.0, ""
+    n, fixed, ends, budget = 8, 0.0, "", 0
     i = 1
     while i <= length(args)
         a = args[i]
@@ -2042,6 +2091,9 @@ function diagnose_cli(args=ARGS)
         elseif a == "--ends" && i < length(args)
             ends = args[i + 1]
             i += 2
+        elseif a == "--budget" && i < length(args)
+            budget = something(tryparse(Int, args[i + 1]), 0)
+            i += 2
         else
             push!(files, a)
             i += 1
@@ -2050,7 +2102,8 @@ function diagnose_cli(args=ARGS)
     isempty(files) && (
         println(
             stderr,
-            "usage: timings.tsv [sections.tsv [shards.tsv]] [--shards N] [--fixed S] [--ends F]",
+            "usage: timings.tsv [sections.tsv [shards.tsv]] [--shards N] [--fixed S] [--ends F] " *
+            "[--budget J]",
         );
         return 1
     )
@@ -2065,7 +2118,7 @@ function diagnose_cli(args=ARGS)
         Dict{String,Vector{Pair{String,Float64}}}()
     end
     shards = length(files) > 2 ? load_shards(files[3]; ends) : ShardWindow[]
-    print(diagnose_report(diagnose(timings; n, fixed, sections, shards)))
+    print(diagnose_report(diagnose(timings; n, fixed, sections, shards, budget)))
     return 0
 end
 
