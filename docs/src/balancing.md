@@ -127,21 +127,45 @@ dispatch on it:
 | [`FloorBound`](@ref TestShards.FloorBound) | the heaviest single unit is what is left | cut that unit in two |
 | [`WorkBound`](@ref TestShards.WorkBound) | nothing is in the way | more shards would still help |
 
-They are tested in that order, because fixing one is what exposes the next: a queue-bound run
-says nothing about its own balance, since the balance was never given a chance to matter. The
-budget comes second for the same reason — shards that queued behind the account's limit cannot
-tell you whether the split was any good.
+### Usually more than one is true, and the choice between them is yours
 
-`BudgetBound` is the odd one out, and deliberately so: it is the only regime that is **not a
-fact about the suite**. Shard counts are chosen per repository; hosted runners are budgeted per
+They are tested in that order, because fixing one is what exposes the next: a queue-bound run
+says nothing about its own balance, since the balance was never given a chance to matter.
+
+**That order is a policy, not a measurement.** A run is regularly queue-bound *and* past its
+knee *and* over budget — three independent facts, wanting different things. `bottleneck`
+returns the first under the default rule; [`TestShards.bottlenecks`](@ref) returns **all of
+them**, and the CI summary prints every one rather than the winner alone.
+
+Nothing is resolved away behind that default. [`TestShards.remedy`](@ref) and
+[`TestShards.usable_shards`](@ref) dispatch on any regime, so a different rule is a call away:
+
+```julia
+d  = TestShards.diagnose(t; n = 16, budget = 8, shards = w)
+bs = TestShards.bottlenecks(d)                            # everything that holds
+
+TestShards.usable_shards(TestShards.FloorBound(), d)      # what the SUITE could use
+TestShards.usable_shards(TestShards.BudgetBound(), d)     # what the ACCOUNT will supply
+```
+
+### The budget is a constraint, and this package does not resolve it
+
+`BudgetBound` is the odd one out, deliberately: it is the only regime that is **not a fact about
+the suite**. Shard counts are chosen per repository; hosted runners are budgeted per
 **organisation**. Measured on QAtlasHub, two repositories running sixteen shards and eight were
 91% of the org's CI on a busy day, at a peak of 27 concurrent jobs between them — so they could
-not both run at full width, and the eleventh shard of either was queueing behind the other
+not both run at full width, and the surplus shards of either were queueing behind the other
 repository rather than adding parallelism.
 
-Nothing inside a test run can observe that, so it has to be told: `concurrency-budget` in the
-workflow, `budget` in [`TestShards.diagnose`](@ref). Left unset, the diagnosis behaves exactly
-as before and says nothing about it.
+The knee is a property of your suite; the budget is a limit on your account. **Which of the two
+should give way is a decision about your repository**, and it has a different answer depending
+on whether that repository is the one you care about finishing first. So `usable_shards` does
+not quietly take the smaller of the two: it answers under the regime it is given, both are
+askable, and the report states both numbers.
+
+Nothing inside a test run can observe an account's limit, so unlike everything else here it has
+to be told: `concurrency-budget` in the workflow, `budget` in [`TestShards.diagnose`](@ref).
+Left unset, the diagnosis behaves exactly as before and claims nothing about it.
 
 This is a type rather than a paragraph because **the same numbers mean opposite things at
 different scales**. A 49 s per-shard cost and a 130 s start window are fatal to a 150 s suite

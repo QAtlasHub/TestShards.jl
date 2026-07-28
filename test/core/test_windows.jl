@@ -328,13 +328,49 @@ end
         TestShards.WorkBound
 end
 
-@testset "a known budget also caps the recommendation in the other regimes" begin
-    # FloorBound would recommend the knee. The knee is still more than the account can run.
-    heavy = Dict("heavy" => 40.0, "a" => 5.0, "b" => 5.0, "c" => 5.0)
-    d = TestShards.diagnose(heavy; n=2, budget=1)
-    @test TestShards.usable_shards(d) <= 1
-    # Without a budget the same suite recommends its knee, whatever that is.
-    @test TestShards.usable_shards(TestShards.diagnose(heavy; n=2)) >= 1
+@testset "the constraint is reported, not resolved" begin
+    # A budget is a fact about the ACCOUNT and the knee is a fact about the SUITE. Which should
+    # give way is a decision about the repository, so both stay askable and neither is quietly
+    # applied to the other.
+    even = Dict("u$i" => 10.0 for i in 1:20)
+    d = TestShards.diagnose(even; n=10, budget=4)
+
+    @test TestShards.usable_shards(TestShards.BudgetBound(), d) == 4       # the account
+    @test TestShards.usable_shards(TestShards.FloorBound(), d) == d.knee   # the suite
+    @test d.knee > 4                                                       # they disagree
+    # And the default answers under ONE policy, which is named rather than hidden.
+    @test TestShards.usable_shards(d) == 4
+
+    # Every regime that holds is reachable, so a caller can apply its own rule.
+    bs = TestShards.bottlenecks(d)
+    @test TestShards.BudgetBound() in bs
+    @test length(bs) >= 1
+    @test TestShards.bottleneck(d) === first(bs)
+    md = TestShards.diagnose_report(d)
+    @test occursin("BudgetBound", md)
+end
+
+@testset "several regimes can hold at once, and all of them are reported" begin
+    # Queue-bound AND past the knee AND over budget: three independent facts, and dropping two
+    # of them would be choosing for the reader.
+    t = Dict("u$i" => 10.0 for i in 1:8)
+    late = [
+        TestShards.ShardWindow("s1", 0.0, 100.0, 4, 40.0, 8),
+        TestShards.ShardWindow("s2", 80.0, 100.0, 4, 40.0, 8),
+    ]
+    d = TestShards.diagnose(t; n=8, budget=2, shards=late)
+    bs = TestShards.bottlenecks(d)
+    @test TestShards.QueueBound() in bs
+    @test TestShards.BudgetBound() in bs
+    @test length(bs) > 1
+    md = TestShards.diagnose_report(d)
+    @test occursin("QueueBound", md)
+    @test occursin("also", md)                 # the rest are not dropped
+    @test occursin("BudgetBound", md)
+
+    # WorkBound is the only one that means "none of the others", so it never shares.
+    clean = TestShards.diagnose(Dict("u$i" => 10.0 for i in 1:20); n=2)
+    @test TestShards.bottlenecks(clean) == [TestShards.WorkBound()]
 end
 
 @testset "the observed queue still wins over the declared budget" begin

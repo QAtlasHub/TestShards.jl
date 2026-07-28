@@ -1774,18 +1774,47 @@ most 2s of.
 So the question is asked directly. If the last shard started 2s after the first, the queue did
 not set a 70s wall clock, whatever the model expected.
 """
-function bottleneck(d::Diagnosis)
+bottleneck(d::Diagnosis) = first(bottlenecks(d))
+
+"""
+    bottlenecks(d::Diagnosis) -> Vector{Bottleneck}
+
+**Every** regime whose condition holds, in the order [`bottleneck`](@ref) tests them.
+
+More than one is usually true. A run can be queue-bound, past its knee, and asking for more
+shards than the account runs, all at once — those are three independent facts about it.
+[`bottleneck`](@ref) returns the first, and *which one comes first is a policy, not a
+measurement*. This is the set it was chosen from.
+
+Nothing here is hidden behind that choice. [`remedy`](@ref) and [`usable_shards`](@ref)
+dispatch on any [`Bottleneck`](@ref), so a caller that wants a different rule writes it:
+
+```julia
+bs = TestShards.bottlenecks(d)
+# "tell me what the SUITE says, whatever the account can supply"
+TestShards.usable_shards(TestShards.FloorBound(), d)
+# "I care about the account first"
+TestShards.BudgetBound() in bs && TestShards.remedy(TestShards.BudgetBound(), d)
+```
+
+The default order is defended in [`bottleneck`](@ref). It is a reasonable rule and it is not
+the only one, which is why the alternatives stay reachable rather than being resolved away.
+"""
+function bottlenecks(d::Diagnosis)
+    found = Bottleneck[]
     o = d.observed
     # A quarter of the run spent waiting for the last shard to arrive. Below that, whatever
     # else is wrong, it is not the queue.
-    o !== nothing && o.wall > 0 && o.start_window > 0.25 * o.wall && return QueueBound()
-    # Second for the same reason the queue is first: asking for more shards than the account
-    # runs at once means the surplus queued, and a run whose shards queued says nothing about
-    # its own balance. Declared rather than observed, so it only fires when someone said so.
-    0 < d.budget < d.n && return BudgetBound()
-    d.fixed > _max_bin_at(d, d.n) && return FixedCostBound()
-    d.knee <= d.n && return FloorBound()
-    return WorkBound()
+    o !== nothing &&
+        o.wall > 0 &&
+        o.start_window > 0.25 * o.wall &&
+        push!(found, QueueBound())
+    # Declared rather than observed, so it only appears when someone said so.
+    0 < d.budget < d.n && push!(found, BudgetBound())
+    d.fixed > _max_bin_at(d, d.n) && push!(found, FixedCostBound())
+    d.knee <= d.n && push!(found, FloorBound())
+    isempty(found) && push!(found, WorkBound())
+    return found
 end
 
 "The heaviest bin at `n`, recovered from the wall curve so the timings need not be kept."
@@ -1796,15 +1825,21 @@ end
 """
     usable_shards(d::Diagnosis) -> Int
 
-How many shards are worth starting, which is not always the knee.
+How many shards are worth starting under the regime [`bottleneck`](@ref) selected — which is
+not always the knee, and is not always what you want asked.
 
-Under [`QueueBound`](@ref) it is the number of runners the scheduler actually granted at once:
-requesting more produced jobs that queued rather than parallelism. Otherwise it is the knee.
+Under [`QueueBound`](@ref) it is the number of runners the scheduler actually granted at once;
+under [`BudgetBound`](@ref) it is the account's limit; otherwise it is the knee.
+
+**It answers one question under one policy.** Call it with a regime to ask a different one —
+`usable_shards(FloorBound(), d)` for what the suite could use regardless of what the account
+supplies, `usable_shards(BudgetBound(), d)` for the reverse. [`bottlenecks`](@ref) says which
+are true at once, and this deliberately does not reconcile them: the budget is a constraint on
+the account, the knee is a property of the suite, and which of the two should give way is a
+decision about the repository that the diagnosis is in no position to make.
 """
 usable_shards(d::Diagnosis) = usable_shards(bottleneck(d), d)
-function usable_shards(::Bottleneck, d::Diagnosis)
-    return d.budget > 0 ? min(d.knee, d.budget) : d.knee
-end
+usable_shards(::Bottleneck, d::Diagnosis) = d.knee
 usable_shards(::BudgetBound, d::Diagnosis) = d.budget
 function usable_shards(::QueueBound, d::Diagnosis)
     o = d.observed
@@ -1956,7 +1991,9 @@ function Base.show(io::IO, ::MIME"text/plain", d::Diagnosis)
             " last)",
         )
     end
-    row("bottleneck", nameof(typeof(bottleneck(d))), " — use shards: ", usable_shards(d))
+    bs = bottlenecks(d)
+    also = length(bs) > 1 ? "  (also " * join(nameof.(typeof.(bs[2:end])), ", ") * ")" : ""
+    row("bottleneck", nameof(typeof(first(bs))), " — use shards: ", usable_shards(d), also)
     println(io, "\n  heaviest units")
     for (k, v) in first(d.units, min(5, length(d.units)))
         println(io, "    ", rpad(round(v; digits=1), 8), k)
@@ -2017,7 +2054,14 @@ function diagnose_report(d::Diagnosis)
     # One sentence, chosen by dispatch on what is actually limiting this suite. The four
     # regimes want opposite actions — split the floor unit, or stop splitting — so leaving the
     # reader to pick from a list of true statements is how the wrong one gets acted on.
-    println(io, "\n> **", nameof(typeof(bottleneck(d))), ".** ", remedy(d))
+    # Every regime that holds, not only the one the default policy ranks first. Several are
+    # usually true, they want different things, and which to act on is a decision about this
+    # repository — reporting one and dropping the rest would be making it here.
+    for (i, b) in enumerate(bottlenecks(d))
+        println(
+            io, "\n> ", i == 1 ? "**" : "*also* **", nameof(typeof(b)), ".** ", remedy(b, d)
+        )
+    end
     println(io, "\n<details><summary>Heaviest units</summary>\n")
     println(io, "| unit | seconds | share |\n|---|--:|--:|")
     for (k, v) in first(d.units, min(10, length(d.units)))
