@@ -1164,6 +1164,58 @@ function line_totals(fs::AbstractVector{LcovFile})
 end
 
 """
+    restore_counters(parts, dest = ".") -> Vector{String}
+
+Put every shard's raw coverage counters back where their sources are, tagged so they cannot
+collide. Returns the paths written.
+
+Julia writes `Foo.jl.<pid>.cov` beside `Foo.jl`, and CoverageTools finds them by globbing
+`Foo.jl.*.cov`. Shards run on different machines, so their PIDs can be equal — `s1` and `s4`
+both producing `TestShards.jl.1234.cov` would have one silently overwrite the other, and the
+lost shard's coverage would simply not appear. The shard label goes into the name to prevent
+that, in the glob's wildcard where CoverageTools still matches it.
+
+`parts` is the artifact download directory: one subdirectory per shard, named
+`...coverage-<shard>`, each holding the counter files under their original relative paths.
+
+This exists in the package rather than in the workflow because it is the step where coverage
+can go missing without anything failing — and the last thing to hold that job silently reported
+54.5% for a suite that covered 94.8% for as long as it existed.
+"""
+function restore_counters(parts::AbstractString, dest::AbstractString=".")
+    written = String[]
+    isdir(parts) || return written
+    for entry in sort(readdir(parts; join=true))
+        isdir(entry) || continue
+        shard = _counter_shard(basename(entry))
+        isempty(shard) && continue
+        for (root, _, files) in walkdir(entry)
+            for f in files
+                endswith(f, ".cov") || continue
+                rel = relpath(joinpath(root, f), entry)
+                out = joinpath(dest, _tag_counter(rel, shard))
+                mkpath(dirname(out))
+                cp(joinpath(root, f), out; force=true)
+                push!(written, out)
+            end
+        end
+    end
+    return written
+end
+
+"`testshards-coverage-s3` → `s3`; anything else → `\"\"`."
+function _counter_shard(dir::AbstractString)
+    i = findlast("coverage-", dir)
+    i === nothing && return ""
+    return String(dir[(last(i) + 1):end])
+end
+
+"`src/Foo.jl.123.cov` → `src/Foo.jl.123-s3.cov`, which `Foo.jl.*.cov` still matches."
+function _tag_counter(rel::AbstractString, shard::AbstractString)
+    return string(chop(rel; tail=length(".cov")), "-", shard, ".cov")
+end
+
+"""
     merge_lcov(paths) -> Vector{LcovFile}
 
 Merge lcov tracefiles into **one record per source file**, in the order the files were first
