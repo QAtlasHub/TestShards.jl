@@ -214,6 +214,19 @@ jobs:
           retention-days: 1
           if-no-files-found: error
 
+      # After the work that follows the tests — processing coverage above is the big one — and
+      # before the upload that carries it away. A shard cannot write this from inside Julia: by
+      # the time the job ends its test process is long gone. Everything after this line (the
+      # two uploads, the cache save) is still missed, and that is seconds rather than the ~25s
+      # this recovers.
+      - name: Stamp when this shard's job finished
+        if: always()
+        run: |
+          set -euo pipefail
+          out="${{ github.workspace }}/${{ inputs.test-root }}/.ci-out"
+          mkdir -p "$out"
+          printf '%s\t%s\n' "${{ matrix.sid }}" "$(date +%s)" > "$out/ended-${{ matrix.sid }}.tsv"
+
       - name: Upload this shard's records and timings
         if: always()
         uses: actions/upload-artifact@v4
@@ -305,6 +318,7 @@ jobs:
           set -euo pipefail
           find parts -name 'shard-*.tsv' -exec cat {} + | sort -u > all-shards.tsv || : > all-shards.tsv
           find parts -name 'ran-*.tsv'   -exec cat {} + | sort -u > all-ran.tsv    || : > all-ran.tsv
+          find parts -name 'ended-*.tsv' -exec cat {} + | sort -u > all-ended.tsv  || : > all-ended.tsv
           # tee, not redirect: when this fails it is a required check going red, and the
           # reason has to be in the log people open first, not only in the run summary.
           julia --startup-file=no --project="$RUNNER_TEMP/tsenv" -e '
@@ -363,6 +377,7 @@ jobs:
             exit(TestShards.diagnose_cli([
                 "all-timings.tsv", "all-sections.tsv", "all-shards.tsv",
                 "--shards", ENV["SHARDS"], "--fixed", ENV["FIXED"],
+                "--ends", "all-ended.tsv",
             ]))' >> "$GITHUB_STEP_SUMMARY"
 
   timings:

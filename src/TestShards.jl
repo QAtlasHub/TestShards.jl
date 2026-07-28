@@ -126,10 +126,13 @@ the fixed cost each shard actually paid.
 or two between shards is noise rather than a queue effect.
 
 The window runs from the job's start — CI reports it through `TESTSHARDS_JOB_START` — to the
-moment the test process ends. Per-shard work *after* the tests is therefore outside it:
-processing coverage, uploading artefacts. Measured on this repository that tail is around 25s
-against a 23.5s window, so treat [`fixed_cost`](@ref) as a **lower bound** on what a shard
-costs. See issue #16.
+moment the test process ends, which is as far as a shard can see: it is not running when its
+job finishes. Work the job does *after* the tests — processing coverage, uploading artefacts —
+is therefore outside it, and measured here that tail is about half the fixed cost on this suite.
+
+CI closes the gap from outside by stamping the job's end into an `ended-*.tsv` that
+[`load_shards`](@ref) folds back in. Without that file `finished` is the process end and
+[`fixed_cost`](@ref) is a **lower bound**.
 """
 struct ShardWindow
     shard::String
@@ -147,8 +150,9 @@ window(w::ShardWindow) = w.finished - w.started
 The part of a shard's window that no split of the suite can remove: checkout, depot restore,
 precompilation, and the sandbox `Pkg.test` builds before the first unit runs.
 
-A **lower bound** — whatever the job does after the test process exits is not in the window.
-See [`ShardWindow`](@ref).
+Exact when CI supplied the job's end (see [`ShardWindow`](@ref) and [`load_ends`](@ref)); a
+**lower bound** without it, because the window then stops at the test process rather than at
+the job.
 """
 fixed_cost(w::ShardWindow) = window(w) - w.unit_seconds
 
@@ -1245,29 +1249,62 @@ function load_sections(path::AbstractString)
 end
 
 """
-    load_shards(path) -> Vector{ShardWindow}
+    load_ends(path) -> Dict{String,Float64}
+
+Read merged `ended-*.tsv` rows, `shard <TAB> epoch seconds`: when each shard's JOB finished, as
+opposed to when its test process did.
+
+A shard cannot record this itself — it is not running any more. CI writes it after the work
+that follows the tests, which on this repository is coverage processing and is not small. One
+number per shard, so the only format knowledge outside this file is a `printf`.
+"""
+function load_ends(path::AbstractString)
+    ends = Dict{String,Float64}()
+    (isempty(path) || !isfile(path)) && return ends
+    for ln in eachline(path)
+        parts = split(rstrip(ln, ['\n', '\r']), '\t')
+        length(parts) == 2 || continue
+        v = tryparse(Float64, parts[2])
+        v === nothing && continue
+        ends[String(parts[1])] = v
+    end
+    return ends
+end
+
+"""
+    load_shards(path; ends = "") -> Vector{ShardWindow}
 
 Read merged `shard-*.tsv` rows (`shard`, started, finished, units, unit seconds, observed).
 Malformed rows are ignored, like [`load_timings`](@ref): a diagnosis must never be the thing
 that fails a run.
+
+`ends` is an optional [`load_ends`](@ref) file, and it fixes a real understatement rather than
+adding a nicety. The `finished` a shard can write for itself is when its test PROCESS ended;
+everything the job does afterwards — processing coverage, uploading artefacts — is outside it.
+Measured here that tail is about half the fixed cost on this suite and about a tenth of it on a
+large one, so without `ends` [`fixed_cost`](@ref) is a lower bound, and the
+[`FixedCostBound`](@ref) test built on it is biased towards saying no.
+
+A shard present in `ends` gets the later of the two timestamps; one absent keeps its own, so a
+partial file degrades the measurement rather than corrupting it.
 """
-function load_shards(path::AbstractString)
+function load_shards(path::AbstractString; ends="")
     ws = ShardWindow[]
     (isempty(path) || !isfile(path)) && return ws
+    stamps = ends isa AbstractDict ? ends : load_ends(ends)
     for ln in eachline(path)
         parts = split(rstrip(ln, ['\n', '\r']), '\t')
         length(parts) == 6 || continue
         nums = map(p -> tryparse(Float64, p), parts[2:6])
         any(isnothing, nums) && continue
+        shard = String(parts[1])
+        # `max`, not replace: a stamp earlier than the process end would mean the clock moved
+        # backwards, and shrinking a window is never the safe direction for a lower bound.
+        finished = max(nums[2], get(stamps, shard, -Inf))
         push!(
             ws,
             ShardWindow(
-                String(parts[1]),
-                nums[1],
-                nums[2],
-                round(Int, nums[3]),
-                nums[4],
-                round(Int, nums[5]),
+                shard, nums[1], finished, round(Int, nums[3]), nums[4], round(Int, nums[5])
             ),
         )
     end
@@ -1797,8 +1834,8 @@ end
 """
     diagnose_cli(args = ARGS) -> Int
 
-`timings.tsv [sections.tsv [shards.tsv]] [--shards N] [--fixed SECONDS]`, printing the Markdown
-report. Used by the CI collect step so every run says where the suite is badly shaped.
+`timings.tsv [sections.tsv [shards.tsv]] [--shards N] [--fixed SECONDS] [--ends FILE]`,
+printing the Markdown report. Used by the CI collect step so every run says where the suite is badly shaped.
 
 The files are positional and in that order, because each one only adds detail to the answer:
 the timings alone say how many shards the suite can use, the sections say where to cut the unit
@@ -1806,7 +1843,7 @@ that limits it, and the shard windows say whether the shards actually ran at the
 """
 function diagnose_cli(args=ARGS)
     files = String[]
-    n, fixed = 8, 0.0
+    n, fixed, ends = 8, 0.0, ""
     i = 1
     while i <= length(args)
         a = args[i]
@@ -1816,6 +1853,9 @@ function diagnose_cli(args=ARGS)
         elseif a == "--fixed" && i < length(args)
             fixed = something(tryparse(Float64, args[i + 1]), 0.0)
             i += 2
+        elseif a == "--ends" && i < length(args)
+            ends = args[i + 1]
+            i += 2
         else
             push!(files, a)
             i += 1
@@ -1824,7 +1864,7 @@ function diagnose_cli(args=ARGS)
     isempty(files) && (
         println(
             stderr,
-            "usage: timings.tsv [sections.tsv [shards.tsv]] [--shards N] [--fixed S]",
+            "usage: timings.tsv [sections.tsv [shards.tsv]] [--shards N] [--fixed S] [--ends F]",
         );
         return 1
     )
@@ -1838,7 +1878,7 @@ function diagnose_cli(args=ARGS)
     else
         Dict{String,Vector{Pair{String,Float64}}}()
     end
-    shards = length(files) > 2 ? load_shards(files[3]) : ShardWindow[]
+    shards = length(files) > 2 ? load_shards(files[3]; ends) : ShardWindow[]
     print(diagnose_report(diagnose(timings; n, fixed, sections, shards)))
     return 0
 end
