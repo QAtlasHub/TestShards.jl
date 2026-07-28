@@ -184,15 +184,29 @@ inside *every one* of sixteen shards — about 3,500 runner-seconds a run for on
 here, a shard that adopts the shared cache prints no precompile line at all, and adopting it
 costs 1.8 s.
 
-**It is a trade, not a win.** The build is serialised in front of the shards, so it buys runner
-time and costs some wall clock, and the shards each pay a download. On a suite whose
-precompilation is seconds it is a net loss — this package's own is 1–4 s, and turning it on
-here costs more than it saves. At QAtlas's numbers it saves ~3,200 runner-seconds a run.
+What it promises is exactly that: the package is precompiled once, and the shards adopt the
+result instead of repeating it. That is verified — a shard which adopts the cache prints no
+precompile line at all, where the same shard without it prints one.
 
-Which side of that you want is a fact about your **account**, not your suite — see the budget
-discussion above; runner-seconds spent here are capacity taken from every other repository in
-the organisation. So it is off by default, and the numbers to decide it with are in the
-diagnosis.
+Whether that is *worth* it is arithmetic over three numbers, and they are yours rather than
+this package's:
+
+```
+saved   N × (precompilation per shard)
+cost    (the build job) + N × (download and untar)
+```
+
+Measured here, for reference at each end. On this package — one dependency, 1–4 s of
+precompilation — the build job costs more than it saves, 581 → 614 total runner-seconds over
+four shards. At QAtlas.jl's numbers, ~219 s inside each of sixteen shards, the same arithmetic
+returns about 3,200 runner-seconds a run. Adoption itself was 1.8 s per shard on a 4.4 MB
+cache.
+
+The build is serialised in front of the shards, so this buys runner time and spends a little
+wall clock. Which of the two you would rather have is a fact about your **account** — see the
+budget discussion above: runner-seconds are capacity shared with every other repository in the
+organisation — so it is an input rather than a default, and the numbers to set it with come out
+of the diagnosis.
 
 ## Sharing the depot cache
 
