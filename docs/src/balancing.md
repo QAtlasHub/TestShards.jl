@@ -99,9 +99,15 @@ that subtraction — so `diagnose` measures `fixed` rather than guessing it, and
 `fixed-cost-seconds` workflow input can stay at `0`. Set it only to ask what a hypothetical
 price would do to the curve; an explicit value wins over the measured one.
 
-The window ends when the test process does, so per-shard work that happens *after* the tests —
-processing coverage, uploading artefacts — falls outside it. The measured `fixed` is a lower
-bound on what a shard really costs.
+A shard can only see as far as its own test process, and its job keeps going afterwards —
+processing coverage, uploading artefacts. CI therefore stamps the job's end separately and the
+diagnosis folds it back in, because that tail is not small: measured here it is about **half**
+the fixed cost on this suite, and about a tenth of it on a large one.
+
+Without that stamp the measured `fixed` is a **lower bound**, and so is every conclusion drawn
+from it — including [`FixedCostBound`](@ref TestShards.FixedCostBound), which is the test that
+decides whether work stealing is worth anything. Understating the fixed cost biases that test
+towards saying no.
 
 `fixed` scales the reported cost but not the knee, so an unmeasured run still answers "how many
 shards can this suite use".

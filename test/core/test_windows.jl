@@ -48,6 +48,64 @@ end
     @test TestShards.load_shards(joinpath(dir, "absent.tsv")) == TestShards.ShardWindow[]
 end
 
+@testset "the job's end is folded in, because a shard cannot see its own" begin
+    d = mktempdir()
+    shards = joinpath(d, "shards.tsv")
+    # A shard whose test process ended at 160, in a job that ran until 200: the 40s in between
+    # is coverage processing and uploads, and it is fixed cost the shard cannot report.
+    write(shards, "s1\t100.0\t160.0\t2\t40.0\t3\ns2\t100.0\t150.0\t1\t10.0\t3\n")
+
+    bare = TestShards.load_shards(shards)
+    @test TestShards.fixed_cost(bare[1]) ≈ 20.0        # 60s window, 40s of units
+
+    ends = joinpath(d, "ended.tsv")
+    write(ends, "s1\t200.0\ns2\t190.0\n")
+    @test TestShards.load_ends(ends) == Dict("s1" => 200.0, "s2" => 190.0)
+
+    fixed = TestShards.load_shards(shards; ends)
+    @test fixed[1].finished == 200.0
+    @test TestShards.fixed_cost(fixed[1]) ≈ 60.0       # three times what the shard could see
+
+    # A shard missing from the file keeps its own figure rather than being dropped.
+    partial = joinpath(d, "partial.tsv")
+    write(partial, "s1\t200.0\n")
+    ws = TestShards.load_shards(shards; ends=partial)
+    @test ws[1].finished == 200.0
+    @test ws[2].finished == 150.0
+
+    # A stamp EARLIER than the process end would mean the clock ran backwards. Shrinking a
+    # lower bound is never the safe direction, so it is ignored.
+    backwards = joinpath(d, "backwards.tsv")
+    write(backwards, "s1\t120.0\n")
+    @test TestShards.load_shards(shards; ends=backwards)[1].finished == 160.0
+
+    @test isempty(TestShards.load_ends(joinpath(d, "absent.tsv")))
+    write(joinpath(d, "bad.tsv"), "s1\tnot-a-number\ns2\n")
+    @test isempty(TestShards.load_ends(joinpath(d, "bad.tsv")))
+end
+
+@testset "a bigger measured fixed cost can flip the regime, which is the point" begin
+    # This is why the understatement mattered rather than being untidy: the recommendation to
+    # steal or not is FixedCostBound, and FixedCostBound is `fixed > heaviest bin`.
+    t = Dict("heavy" => 40.0, "a" => 5.0, "b" => 5.0)
+    seen = [
+        TestShards.ShardWindow("s1", 0.0, 70.0, 1, 40.0, 3),
+        TestShards.ShardWindow("s2", 0.0, 40.0, 2, 10.0, 3),
+    ]
+    # As the shards saw it: 30s and 30s of setup against a 40s bin — work-dominated.
+    @test !(
+        TestShards.bottleneck(TestShards.diagnose(t; n=2, shards=seen)) isa
+        TestShards.FixedCostBound
+    )
+    # With the jobs' real ends, the same run is setup-dominated and the advice reverses.
+    whole = [
+        TestShards.ShardWindow("s1", 0.0, 120.0, 1, 40.0, 3),
+        TestShards.ShardWindow("s2", 0.0, 90.0, 2, 10.0, 3),
+    ]
+    @test TestShards.bottleneck(TestShards.diagnose(t; n=2, shards=whole)) isa
+        TestShards.FixedCostBound
+end
+
 @testset "effective parallelism is the work divided by the wall clock" begin
     # Two shards, perfectly overlapping: 40s of units each in a 60s window, so 80s of work in
     # 60s of wall clock.
