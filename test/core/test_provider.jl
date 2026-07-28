@@ -126,6 +126,28 @@ end
     end
 end
 
+@testset "a provider can read what a test established" begin
+    # `evidence!` keys on the testset OBJECT, so it already works when the testset is a provider's
+    # rather than ours. `evidence` is the reader that lets that provider surface it without reaching
+    # into this package's internals.
+    saved_ctx = TestShards.CURRENT[]
+    stub = StubSet("u.jl")
+    try
+        @test TestShards.evidence(stub) == Dict{String,Any}()   # no context at all: empty, not an error
+        ctx = bare_ctx()
+        TestShards.CURRENT[] = ctx
+        @test TestShards.evidence(stub) == Dict{String,Any}()   # a context, but nothing recorded
+        ctx.evidence[stub] = Dict{String,Any}(
+            "tolerance" => 1.0e-12, "oracle" => "closed form"
+        )
+        ev = TestShards.evidence(stub)
+        @test ev["tolerance"] == 1.0e-12 && ev["oracle"] == "closed form"
+        @test TestShards.evidence(StubSet("u.jl")) == Dict{String,Any}()   # by identity, not by name
+    finally
+        TestShards.CURRENT[] = saved_ctx
+    end
+end
+
 @testset "the fold keeps the counts, whichever testset ran the unit" begin
     # The regression that would matter and would not show: the balancing history and the
     # completeness verdict are built on these numbers, so a foreign testset must yield the same

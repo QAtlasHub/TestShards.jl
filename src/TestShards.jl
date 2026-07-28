@@ -707,6 +707,25 @@ function evidence!(; kwargs...)
     return nothing
 end
 
+"""
+    evidence(ts) -> Dict{String,Any}
+
+What [`evidence!`](@ref) recorded against a testset — or an empty dictionary when it recorded nothing.
+
+It is keyed on the testset **object**, so it works whichever type that testset is, including one a
+[`register_unit_provider!`](@ref) provider handed out. That is the point of exposing it: a provider
+whose tool renders a suite can put what a test *established* into its output, beside whether the test
+passed, and it does not have to reach into this package's internals to do so.
+
+The evidence for a whole subtree is reachable by walking the testset's own children — a provider's
+type knows its nesting, and this reads one node at a time.
+"""
+function evidence(ts)
+    ctx = CURRENT[]
+    ctx === nothing && return Dict{String,Any}()
+    return get(ctx.evidence, ts, Dict{String,Any}())
+end
+
 # ─────────────────────────────────────────────────────────────────────────────────────
 # The block
 # ─────────────────────────────────────────────────────────────────────────────────────

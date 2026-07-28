@@ -50,6 +50,24 @@ the fix would land in the wrong repository.
 That is also what keeps the dependency graph one-directional: TestShards depends on nothing but two
 standard libraries, and a consumer's extension is invisible to everyone who only wants sharding.
 
+## What a test established
+
+`evidence!` records what a test *grounds* — a tolerance, an achieved residual, the oracle it compared
+against — and it keys that on the testset **object**, so it keeps working when the testset is a
+provider's rather than this package's. `TestShards.evidence(ts)` is the reader:
+
+```julia
+@testset "inflation preserves the tiling" begin
+    err = norm(inflate(t) - reference)
+    evidence!(; tolerance = 1e-12, achieved = err, oracle = "closed-form inflation matrix")
+    @test err < 1e-12
+end
+```
+
+A provider whose tool renders a suite can then put that beside the verdict, instead of it living only
+in this package's records. Walk the testset's own children for a subtree — the provider's type knows
+its own nesting, and the reader takes one node at a time.
+
 ## The first one: Pinax
 
 [Pinax](https://github.com/QAtlasHub/Pinax.jl) renders a test suite as a document. It recovers
