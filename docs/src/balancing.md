@@ -172,6 +172,28 @@ different scales**. A 49 s per-shard cost and a 130 s start window are fatal to 
 and a rounding error on a 40-minute one. Deciding which case you are in is a fact about your
 repository, and every consumer working it out again by hand is how the wrong one gets acted on.
 
+## Precompiling once instead of once per shard
+
+Every shard precompiles the package under test for itself, and the depot cache cannot prevent
+it: the package changes with every commit while its dependencies do not, and the test step runs
+under `--check-bounds=yes` and `--code-coverage`, which is a **different precompile
+configuration** from the one `julia-buildpkg` produced. Measured on QAtlas.jl, that is ~219 s
+inside *every one* of sixteen shards — about 3,500 runner-seconds a run for one answer.
+
+`prebuild: true` builds it once, in its own job, and hands the result to the shards. Measured
+here, a shard that adopts the shared cache prints no precompile line at all, and adopting it
+costs 1.8 s.
+
+**It is a trade, not a win.** The build is serialised in front of the shards, so it buys runner
+time and costs some wall clock, and the shards each pay a download. On a suite whose
+precompilation is seconds it is a net loss — this package's own is 1–4 s, and turning it on
+here costs more than it saves. At QAtlas's numbers it saves ~3,200 runner-seconds a run.
+
+Which side of that you want is a fact about your **account**, not your suite — see the budget
+discussion above; runner-seconds spent here are capacity taken from every other repository in
+the organisation. So it is off by default, and the numbers to decide it with are in the
+diagnosis.
+
 ## Sharing the depot cache
 
 All shards instantiate the same project, so they should share one dependency cache, and the
