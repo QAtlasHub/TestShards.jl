@@ -94,6 +94,11 @@ on:
           It is a TRADE, not a win: the build is serialised in front of the shards, so it buys
           runner time and costs a little wall clock. Off by default; which side you want is a
           fact about your account, not about your suite.
+          HOSTED RUNNERS ONLY. Julia keys a package's compiled cache on its absolute source
+          path, and `$GITHUB_WORKSPACE` is the same on every hosted runner but carries the
+          runner's own name on a self-hosted pool — so there the shards rebuild the package
+          anyway, after paying for the transfer. Dependencies cross either way, and a
+          self-hosted pool sharing one depot already has them.
         type: boolean
         default: false
       concurrency-budget:
