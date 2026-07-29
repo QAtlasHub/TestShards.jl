@@ -1,3 +1,13 @@
 name: Format Check
-on: { pull_request: { paths: ['**/*.jl'] } }
+
+# No `paths:` filter, deliberately. `format / format-check` is a REQUIRED check in the
+# `protect-default-branch` ruleset, and a required check that never runs stays pending
+# forever — a filtered-out pull request is therefore unmergeable, not exempt. That is what
+# stranded #27: a green YAML-only bump whose auto-merge has sat BLOCKED since it opened,
+# because no `.jl` file made the filter fire. Every earlier PR that touched no Julia file
+# reached `main` only through the ruleset's organisation-admin bypass.
+#
+# Running the check on every pull request costs about a minute of a public repository's
+# free runner time, which is the price of the gate reporting on the pull requests it gates.
+on: { pull_request: {} }
 jobs: { format: { uses: QAtlasHub/.github/.github/workflows/format-check.yml@v1 } }
