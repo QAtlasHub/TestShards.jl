@@ -188,6 +188,31 @@ What it promises is exactly that: the package is precompiled once, and the shard
 result instead of repeating it. That is verified — a shard which adopts the cache prints no
 precompile line at all, where the same shard without it prints one.
 
+### It applies to hosted runners
+
+Julia keys a package's compiled cache on the **absolute path of its source**. Move a
+byte-identical tree — same contents, same timestamps — to another path and that package is
+rebuilt from scratch, while everything under `~/.julia/packages` is reused untouched. Measured
+on QAtlas.jl against one prebuilt depot: 0.39 s at the path the cache was built at, 534 s at a
+different one, and 494 s at a different one again with the coverage root held fixed, which is
+what says the path is the cause rather than the flags. Every run reported `17 already
+precompiled`.
+
+So the split is structural. **Dependencies cross between jobs** — they compile from
+`~/.julia/packages`, which is the same location in every job on every machine. **The package
+under test does not** — it compiles from `$GITHUB_WORKSPACE`.
+
+On hosted runners that is `/home/runner/work/<repo>/<repo>`, identical on every machine, so the
+build crosses and `prebuild` delivers what it says. On a self-hosted pool it is
+`.../actions-runners/<runner>/_work/<repo>/<repo>` and carries the runner's own name, so a build
+job and a shard that land on different runners disagree: the shards download the artifact and
+rebuild the package regardless. That is the expensive half — on QAtlas.jl the package's own
+cache is 99% of the precompilation.
+
+It is not a loss worth engineering around, because a self-hosted pool usually does not need this
+feature. Runners sharing a machine share one depot, so the dependency caches — the half that
+*can* cross — are already there without an artifact.
+
 Whether that is *worth* it is arithmetic over three numbers, and they are yours rather than
 this package's:
 
