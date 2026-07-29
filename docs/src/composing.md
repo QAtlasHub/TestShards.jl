@@ -93,14 +93,40 @@ $ julia -e 'using Pinax, Test; Pinax.test("test/runtests.jl"; out="test-report")
 
 One page per unit, sections mirroring the `@testset` nesting. Sharded, each shard *dumps* instead of
 rendering and one job renders every dump as a single document, so the shard boundary does not appear
-in the output:
+in the output.
+
+The shard is the part worth getting right. `Pinax.test()` installs its capture by handing `Pkg.test`
+a `-L` preamble, which is what lets it leave `runtests.jl` alone — but the shard step here does not
+own that call. `julia-actions/julia-runtest` does, and it has inputs for `check_bounds`, `coverage`,
+`depwarn` and the rest, none of which injects a julia flag. Replacing the action to get the preamble
+in would take **coverage** with it, and a shard that emits no `.cov` counters leaves the collect job
+nothing to merge.
+
+So install the capture from inside the suite instead, and leave the shard step exactly as it was:
+
+```julia
+using MyPackage, TestShards, Pinax
+Pinax.install_test_capture!()      # inert unless PINAX_TEST_OUT / PINAX_TEST_DUMP is set
+TestShards.@shard begin
+    include("core/a.jl")
+end
+```
+
+```yaml
+- uses: julia-actions/julia-runtest@v1     # coverage and the rest stay its business
+  env:
+    # Absolute: `Pkg.test` tears its sandbox down around you.
+    PINAX_TEST_DUMP: ${{ github.workspace }}/pinax-dumps/${{ matrix.sid }}.toml
+```
 
 ```console
-# in each shard
-PINAX_TEST_DUMP=pinax-dumps/s1.toml julia -e 'using Pinax, Test; Pinax.test("test/runtests.jl")'
 # once, afterwards
 julia -e 'using Pinax; Pinax.render_test_report(readdir("pinax-dumps"; join=true); out="test-report")'
 ```
+
+Committing that line is safe in both directions: it does nothing unless the environment asks, so a
+developer's `Pkg.test()` is unchanged, and it declines a second install, so a suite carrying it is
+still a valid target for `Pinax.test()`.
 
 Without the provider the two are mutually blind, and silently: with a `DefaultTestSet` per unit,
 Pinax's capture records nothing and reports `0/0 passed` — an empty *and* green report, which is
