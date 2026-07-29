@@ -9,71 +9,6 @@ using .TSHelpers
 # needs, and the fold that keeps the counts right when the testset is not ours. The real consumer
 # (Pinax) is tested end to end in `test_pinax.jl`.
 
-# A minimal foreign testset: it records nothing but its own tally, exactly as an outside tool's
-# would, and it is deliberately NOT a DefaultTestSet.
-mutable struct StubSet <: Test.AbstractTestSet
-    description::String
-    npass::Int
-    nfail::Int
-    nerror::Int
-    nbroken::Int
-    closed::Bool
-end
-StubSet(desc::AbstractString) = StubSet(String(desc), 0, 0, 0, 0, false)
-
-function Test.record(ts::StubSet, res)
-    res isa Test.Pass && (ts.npass += 1)
-    res isa Test.Fail && (ts.nfail += 1)
-    res isa Test.Error && (ts.nerror += 1)
-    res isa Test.Broken && (ts.nbroken += 1)
-    return res
-end
-Test.finish(ts::StubSet) = ts
-
-function stub_fold(ts::StubSet)
-    return (;
-        name=ts.description,
-        duration=0.5,
-        npass=ts.npass,
-        nfail=ts.nfail,
-        nerror=ts.nerror,
-        nbroken=ts.nbroken,
-    )
-end
-
-# A bare context: `_begin` builds one from the environment, and none of that matters here.
-function bare_ctx()
-    return TestShards.ShardContext(
-        mktempdir(),
-        "",
-        nothing,
-        1,
-        Dict{String,String}(),
-        0,
-        0,
-        0,
-        0.0,
-        TestShards.Assigned(),
-        Dict{String,Float64}(),
-        Tuple{Int,String}[],
-        TestShards.UnitRecord[],
-        IdDict{Any,Dict{String,Any}}(),
-    )
-end
-
-# Registration mutates a package-global, so every test here restores it — a provider left behind
-# would change the testset type of every later unit in this suite, including in another file.
-function with_provider(f; name="stub", open, close=(_) -> nothing, fold=stub_fold)
-    saved = TestShards.UNIT_PROVIDER[]
-    TestShards.UNIT_PROVIDER[] = nothing
-    try
-        TestShards.register_unit_provider!(; name=name, open=open, close=close, fold=fold)
-        return f()
-    finally
-        TestShards.UNIT_PROVIDER[] = saved
-    end
-end
-
 @testset "with no provider, a unit runs in a DefaultTestSet" begin
     saved = TestShards.UNIT_PROVIDER[]
     TestShards.UNIT_PROVIDER[] = nothing
@@ -134,7 +69,7 @@ end
     stub = StubSet("u.jl")
     try
         @test TestShards.evidence(stub) == Dict{String,Any}()   # no context at all: empty, not an error
-        ctx = bare_ctx()
+        ctx = bare_context(; shard="", nshards=1)
         TestShards.CURRENT[] = ctx
         @test TestShards.evidence(stub) == Dict{String,Any}()   # a context, but nothing recorded
         ctx.evidence[stub] = Dict{String,Any}(
@@ -152,7 +87,7 @@ end
     # The regression that would matter and would not show: the balancing history and the
     # completeness verdict are built on these numbers, so a foreign testset must yield the same
     # ones. A `nothing` fold result field defaults to zero rather than erroring.
-    ctx = bare_ctx()
+    ctx = bare_context(; shard="", nshards=1)
     stub = StubSet("u.jl")
     for _ in 1:3
         Test.record(stub, Test.Pass(:test, :x, :x, nothing))

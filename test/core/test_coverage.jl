@@ -1,4 +1,6 @@
 using Test, TestShards
+isdefined(Main, :TSHelpers) || include(joinpath(@__DIR__, "helpers.jl"))
+using .TSHelpers
 
 # The bug this file exists to prevent: the collect job merged the shards' lcov reports by
 # concatenating them, which leaves N records for one source file. Summing LF/LH across those
@@ -6,30 +8,14 @@ using Test, TestShards
 # outright. It survived because the merge lived in a workflow step, where no test could reach
 # it. It lives here now.
 
-"Write a minimal lcov tracefile: `src => Dict(line => hits)`."
-function write_trace(path, files)
-    open(path, "w") do io
-        for (src, lines) in files
-            println(io, "SF:", src)
-            for (n, c) in sort(collect(lines); by=first)
-                println(io, "DA:", n, ",", c)
-            end
-            println(io, "LF:", length(lines))
-            println(io, "LH:", count(>(0), values(lines)))
-            println(io, "end_of_record")
-        end
-    end
-    return path
-end
-
 @testset "merging shard reports is a union, not a sum" begin
     d = mktempdir()
     # Two shards of one suite: each loads the whole file, each runs a different half. Line 3 is
     # covered by neither; line 1 by both.
-    a = write_trace(
+    a = lcov_trace(
         joinpath(d, "a.info"), ["src/M.jl" => Dict(1 => 2, 2 => 5, 3 => 0, 4 => 0)]
     )
-    b = write_trace(
+    b = lcov_trace(
         joinpath(d, "b.info"), ["src/M.jl" => Dict(1 => 1, 2 => 0, 3 => 0, 4 => 7)]
     )
 
@@ -50,8 +36,8 @@ end
 
 @testset "the written report has one record per file, with recomputed totals" begin
     d = mktempdir()
-    a = write_trace(joinpath(d, "a.info"), ["src/M.jl" => Dict(1 => 1, 2 => 0)])
-    b = write_trace(joinpath(d, "b.info"), ["src/M.jl" => Dict(1 => 0, 2 => 3)])
+    a = lcov_trace(joinpath(d, "a.info"), ["src/M.jl" => Dict(1 => 1, 2 => 0)])
+    b = lcov_trace(joinpath(d, "b.info"), ["src/M.jl" => Dict(1 => 0, 2 => 3)])
     out = joinpath(d, "merged.info")
     TestShards.write_lcov(out, TestShards.merge_lcov([a, b]))
 
@@ -67,10 +53,10 @@ end
 
 @testset "several source files keep their first-seen order" begin
     d = mktempdir()
-    a = write_trace(
+    a = lcov_trace(
         joinpath(d, "a.info"), ["src/A.jl" => Dict(1 => 1), "src/B.jl" => Dict(1 => 0)]
     )
-    b = write_trace(
+    b = lcov_trace(
         joinpath(d, "b.info"), ["src/B.jl" => Dict(1 => 4), "src/C.jl" => Dict(1 => 1)]
     )
     merged = TestShards.merge_lcov([a, b])
@@ -142,8 +128,8 @@ end
 
 @testset "the CLI writes the report and summarises it" begin
     d = mktempdir()
-    a = write_trace(joinpath(d, "a.info"), ["src/M.jl" => Dict(1 => 1, 2 => 0)])
-    b = write_trace(joinpath(d, "b.info"), ["src/M.jl" => Dict(1 => 0, 2 => 1)])
+    a = lcov_trace(joinpath(d, "a.info"), ["src/M.jl" => Dict(1 => 1, 2 => 0)])
+    b = lcov_trace(joinpath(d, "b.info"), ["src/M.jl" => Dict(1 => 0, 2 => 1)])
     out = joinpath(d, "lcov.info")
 
     md = mktemp() do path, io

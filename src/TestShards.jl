@@ -881,18 +881,23 @@ function _jobj(io, pairs)
     return print(io, "}")
 end
 
+"A JSON array of `items`, each written by `write!(io, item)`. Used for sections and for the\nsection lists hanging off a record, which is the same shape twice."
+function _jarray(items, write!)
+    return sprint() do io
+        print(io, "[")
+        for (i, item) in enumerate(items)
+            i == 1 || print(io, ",")
+            write!(io, item)
+        end
+        return print(io, "]")
+    end
+end
+
 function _jsection(io, s::Section)
     ev = sprint(
         io2 -> _jobj(io2, [k => _jval(v) for (k, v) in sort(collect(s.evidence); by=first)])
     )
-    kids = sprint() do io2
-        print(io2, "[")
-        for (i, c) in enumerate(s.sections)
-            i == 1 || print(io2, ",")
-            _jsection(io2, c)
-        end
-        return print(io2, "]")
-    end
+    kids = _jarray(s.sections, _jsection)
     return _jobj(
         io,
         [
@@ -904,6 +909,24 @@ function _jsection(io, s::Section)
             "nbroken" => _jval(s.nbroken),
             "evidence" => ev,
             "sections" => kids,
+        ],
+    )
+end
+
+"One line of `records-*.jsonl`: the unit, its counts, and its testset tree."
+function _jrecord(io, r::UnitRecord)
+    return _jobj(
+        io,
+        [
+            "key" => _jval(r.key),
+            "index" => _jval(r.index),
+            "shard" => _jval(r.shard),
+            "duration" => _jval(r.duration),
+            "npass" => _jval(r.npass),
+            "nfail" => _jval(r.nfail),
+            "nerror" => _jval(r.nerror),
+            "nbroken" => _jval(r.nbroken),
+            "sections" => _jarray(r.sections, _jsection),
         ],
     )
 end
@@ -922,28 +945,7 @@ function write_records(ctx::ShardContext, dir::AbstractString)
     tag = isempty(ctx.shard) ? "local" : ctx.shard
     open(joinpath(dir, "records-$(tag).jsonl"), "w") do io
         for r in ctx.records
-            secs = sprint() do io2
-                print(io2, "[")
-                for (i, s) in enumerate(r.sections)
-                    i == 1 || print(io2, ",")
-                    _jsection(io2, s)
-                end
-                return print(io2, "]")
-            end
-            _jobj(
-                io,
-                [
-                    "key" => _jval(r.key),
-                    "index" => _jval(r.index),
-                    "shard" => _jval(r.shard),
-                    "duration" => _jval(r.duration),
-                    "npass" => _jval(r.npass),
-                    "nfail" => _jval(r.nfail),
-                    "nerror" => _jval(r.nerror),
-                    "nbroken" => _jval(r.nbroken),
-                    "sections" => secs,
-                ],
-            )
+            _jrecord(io, r)
             println(io)
         end
     end
@@ -1607,6 +1609,9 @@ struct Diagnosis
     budget::Int                                  # concurrent jobs the account can run; 0 = unknown
 end
 
+"Seconds, to one decimal, the way every line of every report wants them."
+_s(x) = string(round(x; digits=1), "s")
+
 "Load of the heaviest bin when LPT-packing `timings` into `n` shards."
 function _max_bin(timings::AbstractDict, n::Integer)
     isempty(timings) && return 0.0
@@ -1618,7 +1623,8 @@ function _max_bin(timings::AbstractDict, n::Integer)
 end
 
 """
-    diagnose(timings; n = 8, fixed = 0.0, sections = Dict(), shards = ShardWindow[]) -> Diagnosis
+    diagnose(timings; n = 8, fixed = 0.0, sections = Dict(), shards = ShardWindow[],
+             budget = 0) -> Diagnosis
 
 Answer three questions the raw numbers do not: how many shards this suite can actually use,
 what is stopping it from using more, and where to cut to move that limit.
@@ -1628,6 +1634,10 @@ minus the time its units took. It is what makes over-sharding expensive rather t
 useless. **Pass `shards` and it is measured rather than guessed** — each window carries exactly
 that subtraction, and their mean becomes `fixed` unless an explicit non-zero `fixed` overrides
 it. `shards` also decides whether the model's premise held: see [`Observation`](@ref).
+
+`budget` is how many jobs the ACCOUNT can run at once, which nothing in a test run can observe
+and which is not a fact about the suite at all — see [`BudgetBound`](@ref). Left at 0 it
+changes nothing and is claimed nothing about.
 """
 function diagnose(
     timings::AbstractDict;
@@ -1744,7 +1754,7 @@ struct WorkBound <: Bottleneck end
 """
     bottleneck(d::Diagnosis) -> Bottleneck
 
-Which of the four regimes this suite is in.
+Which of the five regimes this suite is in.
 
 They are tested in the order below, because that is the order in which fixing one exposes the
 next. A queue-bound run tells you nothing about its balance — the balance was never given a
@@ -1862,16 +1872,16 @@ function remedy(::QueueBound, d::Diagnosis)
         " shards did not overlap: `",
         o.last_shard,
         "` started ",
-        round(o.start_window; digits=1),
-        "s after `",
+        _s(o.start_window),
+        " after `",
         o.first_shard,
         "`, and at most ",
         o.peak,
         " ran at once, so the run took ",
-        round(o.wall; digits=1),
-        "s against a predicted ",
-        round(d.critical_path; digits=1),
-        "s. The queue set this wall clock, not the split — a better balance cannot move it and ",
+        _s(o.wall),
+        " against a predicted ",
+        _s(d.critical_path),
+        ". The queue set this wall clock, not the split — a better balance cannot move it and ",
         "more shards make it worse. Start `shards: ",
         usable_shards(d),
         "`, or move to a runner pool that can start them together.",
@@ -1881,14 +1891,14 @@ end
 function remedy(::FixedCostBound, d::Diagnosis)
     return string(
         "Each shard spends ",
-        round(d.fixed; digits=1),
-        "s getting ready and ",
-        round(_max_bin_at(d, d.n); digits=1),
-        "s testing, so `shards: ",
+        _s(d.fixed),
+        " getting ready and ",
+        _s(_max_bin_at(d, d.n)),
+        " testing, so `shards: ",
         d.n,
         "` buys ",
-        round(d.n * d.fixed; digits=1),
-        "s of setup for it. Lower the setup — cache the depot, drop per-shard work that is not ",
+        _s(d.n * d.fixed),
+        " of setup for it. Lower the setup — cache the depot, drop per-shard work that is not ",
         "tests, build once — or run `shards: ",
         usable_shards(d),
         "`. Splitting further multiplies the cost without touching the wall clock.",
@@ -1902,8 +1912,8 @@ function remedy(::FloorBound, d::Diagnosis)
         "` is at or past the knee, so `",
         d.floor_unit,
         "` (",
-        round(d.floor_time; digits=1),
-        "s) is what is left: no split across jobs finishes sooner than one unit does. Cut it in ",
+        _s(d.floor_time),
+        ") is what is left: no split across jobs finishes sooner than one unit does. Cut it in ",
         "two",
         if isempty(d.split_here)
             ""
@@ -1943,65 +1953,75 @@ function remedy(::WorkBound, d::Diagnosis)
     )
 end
 
-function Base.show(io::IO, ::MIME"text/plain", d::Diagnosis)
-    row(label, rest...) = println(io, "  ", rpad(label, 18), rest...)
-    println(io, "TestShards diagnosis — ", length(d.units), " units")
-    row("serial total", round(d.serial; digits=1), "s")
-    d.fixed > 0 && row("fixed per shard", round(d.fixed; digits=1), "s")
-    row(
-        "predicted at N=$(d.n)",
-        round(d.critical_path; digits=1),
-        "s wall, ",
-        round(d.n * d.fixed + d.serial; digits=1),
-        "s runner",
-    )
-    row("knee", "N=", d.knee, d.knee < d.n ? "  (N=$(d.n) costs more for no gain)" : "")
-    d.budget > 0 && row("account budget", d.budget, " concurrent jobs")
-    row(
-        "floor",
-        d.floor_unit,
-        "  ",
-        round(d.floor_time; digits=1),
-        "s — no split finishes sooner than this",
-    )
+"""
+    _facts(d) -> Vector{Pair{String,String}}
+
+The diagnosis as label/value pairs, in report order.
+
+Both renderers walk this. Adding a fact to one of them and forgetting the other is not a
+hypothetical: `budget` shipped showing in the plain-text summary under one name and in the
+Markdown one under another, and `peak` reached CI in the Markdown only. One list, one set of
+names, and a new fact appears in both or in neither.
+"""
+function _facts(d::Diagnosis)
     o = d.observed
+    facts = ["units" => string(length(d.units)), "serial total" => _s(d.serial)]
+    d.fixed > 0 && push!(facts, "fixed per shard" => _s(d.fixed))
+    push!(
+        facts,
+        "predicted wall at N=$(d.n)" =>
+            _s(d.critical_path) * " wall, " * _s(d.n * d.fixed + d.serial) * " runner",
+    )
+    push!(
+        facts,
+        "knee" => "N=$(d.knee)" * (d.knee < d.n ? "  ($(d.n) costs more for no gain)" : ""),
+    )
+    d.budget > 0 && push!(facts, "account runs at once" => "$(d.budget) jobs")
+    push!(
+        facts,
+        "floor unit" => "$(d.floor_unit)  $(_s(d.floor_time)) — no split finishes sooner than this",
+    )
     if o !== nothing
-        row(
-            "observed",
-            round(o.wall; digits=1),
-            "s wall, ",
-            round(o.runner_seconds; digits=1),
-            "s runner over ",
-            o.nshards,
-            " shards (",
-            o.peak,
-            " at once)",
-        )
-        row(
-            "effective",
-            round(o.effective; digits=1),
-            "x of ",
-            o.nshards,
-            " — start window ",
-            round(o.start_window; digits=1),
-            "s (",
-            o.first_shard,
-            " first, ",
-            o.last_shard,
-            " last)",
+        push!(
+            facts,
+            "observed wall" =>
+                _s(o.wall) *
+                " wall, " *
+                _s(o.runner_seconds) *
+                " runner over $(o.nshards) shards ($(o.peak) at once)",
+            "effective parallelism" =>
+                string(round(o.effective; digits=1)) *
+                "x of $(o.nshards) — " *
+                _s(o.unit_seconds) *
+                " of units in " *
+                _s(o.wall),
+            "start window" =>
+                _s(o.start_window) * " ($(o.first_shard) first, $(o.last_shard) last)",
         )
     end
     bs = bottlenecks(d)
     also = length(bs) > 1 ? "  (also " * join(nameof.(typeof.(bs[2:end])), ", ") * ")" : ""
-    row("bottleneck", nameof(typeof(first(bs))), " — use shards: ", usable_shards(d), also)
+    push!(
+        facts,
+        "bottleneck" => "$(nameof(typeof(first(bs)))) — use shards: $(usable_shards(d))$(also)",
+    )
+    return facts
+end
+
+function Base.show(io::IO, ::MIME"text/plain", d::Diagnosis)
+    println(io, "TestShards diagnosis — ", length(d.units), " units")
+    for (label, value) in _facts(d)
+        label == "units" && continue          # already in the heading
+        println(io, "  ", rpad(label, 22), value)
+    end
     println(io, "\n  heaviest units")
     for (k, v) in first(d.units, min(5, length(d.units)))
-        println(io, "    ", rpad(round(v; digits=1), 8), k)
+        println(io, "    ", rpad(_s(v), 9), k)
     end
     if !isempty(d.split_here)
         println(io, "\n  inside ", d.floor_unit, " — split at the heaviest section")
         for (name, v) in first(d.split_here, min(4, length(d.split_here)))
-            println(io, "    ", rpad(round(v; digits=1), 8), name)
+            println(io, "    ", rpad(_s(v), 9), name)
         end
     end
     return nothing
@@ -2016,47 +2036,13 @@ function diagnose_report(d::Diagnosis)
     io = IOBuffer()
     println(io, "### Shard diagnosis\n")
     println(io, "| | |\n|---|--:|")
-    println(io, "| units | ", length(d.units), " |")
-    println(io, "| serial total | ", round(d.serial; digits=1), "s |")
-    d.fixed > 0 && println(io, "| fixed cost per shard | ", round(d.fixed; digits=1), "s |")
-    println(
-        io, "| predicted wall at N=", d.n, " | ", round(d.critical_path; digits=1), "s |"
-    )
-    println(io, "| knee | N=", d.knee, " |")
-    d.budget > 0 && println(io, "| account runs at once | ", d.budget, " jobs |")
-    println(
-        io, "| floor unit | `", d.floor_unit, "` (", round(d.floor_time; digits=1), "s) |"
-    )
-    o = d.observed
-    if o !== nothing
-        println(io, "| **observed wall** | **", round(o.wall; digits=1), "s** |")
-        println(
-            io,
-            "| effective parallelism | ",
-            round(o.effective; digits=1),
-            "x (",
-            round(o.unit_seconds; digits=1),
-            "s of units in ",
-            round(o.wall; digits=1),
-            "s) |",
-        )
-        println(
-            io,
-            "| start window | ",
-            round(o.start_window; digits=1),
-            "s (",
-            o.peak,
-            " of ",
-            o.nshards,
-            " shards ran at once) |",
-        )
+    for (label, value) in _facts(d)
+        println(io, "| ", label, " | ", value, " |")
     end
-    # One sentence, chosen by dispatch on what is actually limiting this suite. The four
-    # regimes want opposite actions — split the floor unit, or stop splitting — so leaving the
-    # reader to pick from a list of true statements is how the wrong one gets acted on.
-    # Every regime that holds, not only the one the default policy ranks first. Several are
-    # usually true, they want different things, and which to act on is a decision about this
-    # repository — reporting one and dropping the rest would be making it here.
+    # EVERY regime that holds, not only the one the default policy ranks first. Several are
+    # usually true and they want different things — split the floor unit, or stop splitting —
+    # so which to act on is a decision about this repository, and reporting one while dropping
+    # the rest would be making that decision here.
     for (i, b) in enumerate(bottlenecks(d))
         println(
             io, "\n> ", i == 1 ? "**" : "*also* **", nameof(typeof(b)), ".** ", remedy(b, d)
@@ -2066,25 +2052,20 @@ function diagnose_report(d::Diagnosis)
     println(io, "| unit | seconds | share |\n|---|--:|--:|")
     for (k, v) in first(d.units, min(10, length(d.units)))
         println(
-            io,
-            "| `",
-            k,
-            "` | ",
-            round(v; digits=1),
-            " | ",
-            round(100 * v / d.serial; digits=1),
-            "% |",
+            io, "| `", k, "` | ", _s(v), " | ", round(100 * v / d.serial; digits=1), "% |"
         )
     end
     if !isempty(d.split_here)
         println(io, "\n**Split `", d.floor_unit, "` here to lower the floor:**\n")
         println(io, "| section | seconds |\n|---|--:|")
         for (name, v) in first(d.split_here, min(6, length(d.split_here)))
-            println(io, "| ", name, " | ", round(v; digits=1), " |")
+            println(io, "| ", name, " | ", _s(v), " |")
         end
     end
+    println(io, "\n</details>")
+    o = d.observed
     if o !== nothing
-        println(io, "\n</details>\n\n<details><summary>When each shard ran</summary>\n")
+        println(io, "\n<details><summary>When each shard ran</summary>\n")
         println(io, "| shard | started | window | units | on units | fixed |")
         println(io, "|---|--:|--:|--:|--:|--:|")
         for w in o.windows
@@ -2093,20 +2074,20 @@ function diagnose_report(d::Diagnosis)
                 "| `",
                 w.shard,
                 "` | +",
-                round(w.started - o.started; digits=1),
-                "s | ",
-                round(window(w); digits=1),
-                "s | ",
+                _s(w.started - o.started),
+                " | ",
+                _s(window(w)),
+                " | ",
                 w.nunits,
                 " | ",
-                round(w.unit_seconds; digits=1),
-                "s | ",
-                round(fixed_cost(w); digits=1),
-                "s |",
+                _s(w.unit_seconds),
+                " | ",
+                _s(fixed_cost(w)),
+                " |",
             )
         end
+        println(io, "\n</details>")
     end
-    println(io, "\n</details>")
     return String(take!(io))
 end
 
