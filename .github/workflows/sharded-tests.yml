@@ -179,7 +179,7 @@ jobs:
           tar -C "$HOME/.julia" -czf compiled.tgz compiled
           echo "Compiled cache: $(du -h compiled.tgz | cut -f1)"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: testshards-prebuild
           path: compiled.tgz
@@ -307,7 +307,7 @@ jobs:
 
       - name: Upload this shard's coverage counters
         if: ${{ inputs.coverage }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: testshards-coverage-${{ matrix.sid }}
           path: .ts-cov
@@ -319,7 +319,7 @@ jobs:
 
       - name: Upload this shard's records and timings
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: testshards-out-${{ matrix.sid }}
           path: ${{ inputs.test-root }}/.ci-out/*
@@ -453,7 +453,7 @@ jobs:
           echo "Merged $(wc -l < records.jsonl) unit records."
 
       - name: Upload the merged records
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: testshards-records
           path: records.jsonl
