@@ -61,17 +61,30 @@ jobs:
 
 ### Inputs
 
+Every input has a default, so `shards` is the only one most suites ever set.
+
 | input | default | |
 |---|---|---|
 | `shards` | `8` | how many jobs to split across |
-| `runner` | `'"ubuntu-latest"'` | `runs-on` as JSON, e.g. `'["self-hosted","rosina"]'` |
+| `runner` | `'"ubuntu-latest"'` | `runs-on` as JSON, e.g. `'["self-hosted","my-label"]'` |
+| `helper-runner` | `'"ubuntu-latest"'` | runner for the small merge jobs — keep it hosted, they need no depot |
 | `julia-version` | `'1'` | |
 | `test-root` | `'test'` | directory holding `runtests.jl` |
-| `coverage` | `true` | merge the shards' coverage and upload it |
-| `steal` | `false` | claim work instead of being assigned it — see [Guarantees](guarantees.md) |
-| `steal-min-seconds` | `0` | with `steal`, leave units cheaper than this statically assigned |
+| `coverage` | `true` | merge the shards' coverage and upload it once |
 | `diagnose` | `true` | report what the history says about the suite's shape |
+| `steal` | `false` | claim work instead of being assigned it — see [Guarantees](guarantees.md) |
+| `steal-min-seconds` | `'0'` | with `steal`, leave units cheaper than this statically assigned |
+| `stagger-seconds` | `'0'` | delay each shard's start on purpose, to compare arrival strategies |
+| `prebuild` | `false` | precompile once and hand it to the shards — **hosted runners only**, see [Balancing](balancing.md) |
+| `concurrency-budget` | `'0'` | how many jobs your *account* can run at once; `0` = unknown |
 | `fixed-cost-seconds` | `'0'` | per-shard overhead, for the cost figures (see [Balancing](balancing.md)) |
+| `testshards-spec` | a git URL | where the merge jobs install TestShards from |
+
+!!! note "`testshards-spec` follows `main` today"
+    The merge and reporting jobs are themselves TestShards, so the workflow installs the package
+    to run them. Until this package is in the General registry that spec is a git URL pointing at
+    `main`, which means your CI follows this repository's default branch. Pin it if you would
+    rather not: `testshards-spec: 'url="https://github.com/QAtlasHub/TestShards.jl", rev="v0.3.14"'`.
 
 The workflow exposes an `All shards passed` job — that is the one to require in branch
 protection, rather than the individual shards, whose names change with `shards`.

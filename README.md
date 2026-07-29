@@ -6,23 +6,12 @@
 [![Code Style: Blue](https://img.shields.io/badge/Code%20Style-Blue-4495d1.svg)](https://github.com/invenia/BlueStyle)
 [![License](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-Run a Julia test suite across several CI jobs at once, balanced by how long each part actually
-took last time.
+Your test suite runs in one CI job and takes twenty minutes. TestShards runs it in eight jobs and
+takes three, balanced by how long each file actually took last time.
 
-## What you get
-
-- **Sharded CI from a five-line workflow call.** No shard-planning script, no list of test
-  files, no coverage-merge job, no timing-recording job.
-- **Nothing to declare.** The shardable units are whatever `runtests.jl` includes — literal or
-  computed. There is no naming convention to follow and no manifest to keep in sync.
-- **One merged coverage report** and **one ordered record** of what ran, per run.
-- **A diagnosis** naming what is actually limiting your suite — the queue, the per-shard setup,
-  one heavy test, or nothing — and what follows from each.
-- **A completeness check on every run**: the shards reconcile what they observed against what
-  they ran, and the run fails if a unit ran nowhere or twice.
-- **Work stealing**, optional, for when the runners do not start together.
-
-A bare `Pkg.test()` is unchanged: with no environment set, everything runs, in order.
+You wrap `runtests.jl` in one macro and call one workflow. There is no list of test files to
+maintain, no naming convention to follow, and `Pkg.test()` on your machine keeps doing exactly
+what it did before.
 
 ## Install
 
@@ -30,11 +19,22 @@ A bare `Pkg.test()` is unchanged: with no environment set, everything runs, in o
 pkg> add TestShards
 ```
 
-and add it to your test dependencies (`[extras]` + `[targets]` in `Project.toml`).
+It is used *from* your test suite, so it belongs in your test dependencies:
 
-## Use
+```toml
+[extras]
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+TestShards = "acceef1d-f5e0-4fe4-a546-818dc56ce7b2"
 
-**`test/runtests.jl`** — wrap what you already have:
+[targets]
+test = ["Test", "TestShards"]
+```
+
+Julia 1.10 or newer.
+
+## Quick start
+
+**1. Wrap what `test/runtests.jl` already does.**
 
 ```julia
 using MyPackage, TestShards
@@ -48,35 +48,140 @@ TestShards.@shard begin
 end
 ```
 
-**`.github/workflows/CI.yml`**:
+Each `include` is one shardable piece — including the ones the `for` loop produces. Nothing else
+in your suite changes.
+
+**2. Point CI at the workflow.**
 
 ```yaml
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+
 jobs:
   test:
     permissions:
-      contents: write        # to record the timing history
+      contents: write        # required — see the note below
     uses: QAtlasHub/TestShards.jl/.github/workflows/sharded-tests.yml@main
     with:
       shards: 8
     secrets: inherit
 ```
 
-That runs the shards, merges their coverage into one upload, merges their records into one
-ordered document, checks that every unit ran exactly once, updates the timing history, and
-exposes a single `All shards passed` job to require in branch protection.
+That is the whole adoption. You do not write a shard-planning step, a coverage-merge job, or a
+job that records timings — the workflow is those things.
 
-## What to expect
+> **`contents: write` is required.** A called workflow's jobs cannot request more permission than
+> the caller granted, and the timing history is written to a `ci-timings` branch. Granting less
+> makes the run fail to *start*, with no log to read.
 
-A shard costs a fixed amount before it runs anything — checkout, depot restore, precompilation
-— and that cost does not shrink when you add shards. So the wall clock is roughly
+In branch protection, require the **`All shards passed`** job. Do not require the individual
+shards: their names change when you change `shards`.
 
-> `wall(N) = fixed + (load of the heaviest shard)`
+## What you get out of a run
 
-and it stops improving once the heaviest *single test* dominates. Adding shards past that point
-buys nothing and pays the fixed cost again each time.
+| | |
+|---|---|
+| **One coverage upload** | the shards' counters are merged once, not uploaded N times |
+| **One ordered record** | every unit, every testset, in suite order — not eight interleaved logs |
+| **A completeness check** | the run fails if a unit ran nowhere, or ran twice |
+| **A diagnosis** | what is limiting *your* suite, and what follows from it |
 
-`TestShards.diagnose` finds that point for you from the recorded history, and CI prints it on
-every run:
+The first run of a fresh repository has no history, so it falls back to an even split — correct,
+just not yet balanced. It balances itself from the second push to the default branch.
+
+## CI templates
+
+**Self-hosted runners.** `runner` is `runs-on` as JSON, so a list works:
+
+```yaml
+    with:
+      shards: 8
+      runner: '["self-hosted","my-label"]'
+```
+
+**No coverage** (skips the merge and upload jobs entirely):
+
+```yaml
+    with:
+      shards: 8
+      coverage: false
+```
+
+**When the runners do not start together.** On hosted runners they often do not — on this
+repository the start window between the first and last shard has ranged from 2 s to 199 s.
+`steal: true` lets a shard that starts late take less work instead of delaying everyone:
+
+```yaml
+    with:
+      shards: 8
+      steal: true
+```
+
+**When the organisation cannot actually run that many jobs at once.** Shard counts are chosen per
+repository but runners are budgeted per organisation, so a suite that *could* use sixteen may only
+ever get eight — the rest queue and add cost without adding parallelism. Tell the diagnosis what
+you have and it will say so:
+
+```yaml
+    with:
+      shards: 16
+      concurrency-budget: '8'
+```
+
+Every input, with its default, is in
+[Getting started](https://codes.sota-shimozono.com/TestShards.jl/stable/getting-started/).
+
+## Running one shard locally
+
+Sharding is driven entirely by environment variables, so any CI shard reproduces on your machine:
+
+```bash
+TESTSHARDS_ID=s3 TESTSHARDS_N=8 julia --project -e 'using Pkg; Pkg.test()'
+```
+
+Chasing one failure, run exactly the files you care about:
+
+```bash
+TESTSHARDS_UNITS="core/a.jl,solver/heavy.jl" julia --project -e 'using Pkg; Pkg.test()'
+```
+
+With none of them set, everything runs, in order. That is the same `Pkg.test()` you had before.
+
+## How the splitting works, and how it differs
+
+**A unit is whatever `runtests.jl` includes.** `@shard` shadows `include` inside its block, so the
+interception happens at the *call*. A file produced by `for f in readdir(...)` therefore shards
+exactly like a literal `include("a.jl")` — there is nothing to register and nothing to keep in
+sync. Add a test file and it is sharded on the next run.
+
+**Balance comes from measurement, not from counting.** Every green run on the default branch
+records how long each unit took, and the next run bin-packs from those numbers. Splitting by file
+count or by directory puts four fast files against one slow one and calls it balanced.
+
+**Every run reconciles what ran against what was observed.** Splitting a suite introduces a
+failure mode a green badge cannot show you: a unit that ran in *no* shard. So the shards compare
+notes, and the run fails on a hole, a duplicate, or a disagreement.
+
+How that compares with the other ways to split a Julia suite:
+
+| | what defines a piece | how it balances | adding a test file |
+|---|---|---|---|
+| A hand-written job matrix | a list in the workflow | you do, by hand | edit the list — or it silently never runs |
+| A path or naming convention | a directory or filename rule | file count | must be named to match |
+| [ReTestItems.jl](https://github.com/JuliaTesting/ReTestItems.jl), [ParallelTestRunner.jl](https://github.com/JuliaTesting/ParallelTestRunner.jl) | a `@testitem` / a file | worker processes inside one job | nothing |
+| **TestShards** | whatever `runtests.jl` includes | measured runtime | nothing |
+
+The last row and the third are not alternatives. Those packages run tests in parallel **within**
+one job, across worker processes; this splits a suite **across CI jobs**. They compose, and what
+limits each is different: worker processes are bounded by one runner's cores, jobs by what your
+account will schedule at once.
+
+## Reading the diagnosis
+
+CI prints this on every run:
 
 ```
 TestShards diagnosis — 22 units
@@ -90,40 +195,25 @@ TestShards diagnosis — 22 units
   bottleneck        WorkBound — use shards: 10
 ```
 
-That is this package's own suite. Read it as: 217 s of work finished in 70 s; the eight shards
-really did run at once (a 2 s start window); nothing is in the way, so more shards would still
-help, up to ten.
+That is this package's own suite: 217 s of work finished in 70 s, the eight shards really did run
+at once, and nothing is in the way — so more shards would still help, up to ten.
 
-The last line is the one to read first. The same numbers mean opposite things at different
-scales — a 25 s per-shard cost is fatal to a two-minute suite and a rounding error on a
-forty-minute one — so the diagnosis decides which case you are in rather than leaving it to
-you. Under `FloorBound` it also names the heaviest `@testset`s *inside* the unit that is the
-floor, so you know where to cut.
-
-The wall-clock model assumes the shards run at the same time. On GitHub-hosted runners they
-often do not: the start window on this repository has ranged from 2 s to 199 s between
-consecutive pushes. That is why the shards record *when* they ran and not only for how long,
-and why `steal: true` exists — with it, a shard that starts late takes less work instead of
-delaying everyone.
-
-The first run of a fresh repository has no history and falls back to an even split — correct,
-just not yet balanced. It balances itself from the second push to the default branch.
+**Read the last line first.** A shard pays a fixed cost before it runs anything, and that cost
+does not shrink when you add shards, so a 25 s per-shard setup is fatal to a two-minute suite and
+a rounding error on a forty-minute one. The bottleneck line says which case you are in and names
+the remedy that follows — including, under `FloorBound`, the heaviest `@testset`s *inside* the
+one file that no split can finish sooner than.
 
 ## Documentation
 
 | | |
 |---|---|
-| [Getting started](https://codes.sota-shimozono.com/TestShards.jl/stable/getting-started/) | installing, wiring CI, running one shard locally |
-| [Units](https://codes.sota-shimozono.com/TestShards.jl/stable/units/) | what gets split, `@unit`, ordering |
-| [Balancing](https://codes.sota-shimozono.com/TestShards.jl/stable/balancing/) | the timing history, choosing a shard count, the diagnosis |
-| [Records](https://codes.sota-shimozono.com/TestShards.jl/stable/records/) | what each run reports, and `evidence!` |
+| [Getting started](https://codes.sota-shimozono.com/TestShards.jl/stable/getting-started/) | installing, wiring CI, every workflow input, running one shard locally |
+| [Units](https://codes.sota-shimozono.com/TestShards.jl/stable/units/) | what gets split, keeping order-dependent files together |
+| [Balancing](https://codes.sota-shimozono.com/TestShards.jl/stable/balancing/) | the timing history, how many shards your suite can use |
+| [Records](https://codes.sota-shimozono.com/TestShards.jl/stable/records/) | what a run reports, and attaching evidence to a testset |
 | [Guarantees](https://codes.sota-shimozono.com/TestShards.jl/stable/guarantees/) | what cannot silently go wrong, and the one rule your suite must follow |
-
-## Scope
-
-This splits a suite across **CI jobs**. It does not run tests in parallel *within* a job — that
-is [ParallelTestRunner.jl](https://github.com/JuliaTesting/ParallelTestRunner.jl) and
-[ReTestItems.jl](https://github.com/JuliaTesting/ReTestItems.jl)'s business, and the two compose.
+| [Composing](https://codes.sota-shimozono.com/TestShards.jl/stable/composing/) | letting another tool own the testset a unit runs in |
 
 ## License
 
