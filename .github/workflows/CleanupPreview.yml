@@ -1,3 +1,3 @@
 name: Cleanup Preview
 on: { pull_request: { types: [closed] } }
-jobs: { cleanup: { uses: QAtlasHub/.github/.github/workflows/docs-cleanup-preview.yml@v1 } }
+jobs: { cleanup: { uses: QAtlasHub/.github/.github/workflows/docs-cleanup-preview.yml@main } }

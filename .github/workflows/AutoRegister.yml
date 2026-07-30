@@ -4,5 +4,5 @@ on:
 jobs:
   register:
     permissions: { contents: write, issues: write }
-    uses: QAtlasHub/.github/.github/workflows/autoregister.yml@v1
+    uses: QAtlasHub/.github/.github/workflows/autoregister.yml@main
     secrets: inherit

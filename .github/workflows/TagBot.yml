@@ -7,5 +7,5 @@ on:
   workflow_dispatch:        # manual catch-up
 jobs:
   tagbot:
-    uses: QAtlasHub/.github/.github/workflows/tagbot.yml@v1
+    uses: QAtlasHub/.github/.github/workflows/tagbot.yml@main
     secrets: inherit

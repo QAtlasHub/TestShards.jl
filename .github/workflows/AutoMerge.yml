@@ -1,3 +1,3 @@
 name: AutoMerge
 on: { pull_request: { types: [opened, synchronize, reopened, labeled] } }
-jobs: { automerge: { uses: QAtlasHub/.github/.github/workflows/automerge.yml@v1, secrets: inherit } }
+jobs: { automerge: { uses: QAtlasHub/.github/.github/workflows/automerge.yml@main, secrets: inherit } }
