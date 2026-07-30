@@ -10,4 +10,4 @@ name: Format Check
 # Running the check on every pull request costs about a minute of a public repository's
 # free runner time, which is the price of the gate reporting on the pull requests it gates.
 on: { pull_request: {} }
-jobs: { format: { uses: QAtlasHub/.github/.github/workflows/format-check.yml@v1 } }
+jobs: { format: { uses: QAtlasHub/.github/.github/workflows/format-check.yml@main } }
