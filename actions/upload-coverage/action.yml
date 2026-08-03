@@ -6,21 +6,17 @@ description: >
 # WHY THIS IS AN ACTION AND NOT PART OF THE WORKFLOW
 #
 # An action's steps run inside the CALLING job, so a secret passed to it never crosses anything.
-# A reusable workflow's jobs do not, and a secret does not always survive that call: measured on
-# lab-sotashimozono/ITensorAD.jl#20, the token was present in the caller's own job (36 chars)
-# and absent inside the called workflow, with the secret NAMED rather than inherited — the form
-# made no difference.
+# A reusable workflow's jobs do not, and a secret does not always survive that call. Measured
+# across four callers of one reusable, same named `secrets:` block, one variable at a time:
 #
-# What decides it is the caller's VISIBILITY, not the organisation. Three callers, same reusable,
-# same named `secrets:` block, one variable at a time:
+#   same organisation,  public    arrives
+#   other organisation, public    arrives
+#   same organisation,  private   arrives
+#   other organisation, private   EMPTY
 #
-#   QAtlasHub/DataVault.jl                same org, PUBLIC     arrives
-#   lab-sotashimozono/ITensorModels.jl    other org, PUBLIC    arrives
-#   lab-sotashimozono/ITensorAD.jl        other org, PRIVATE   empty
-#
-# The first two differ only in the organisation and agree; the last two differ only in visibility
-# and do not. I asserted the organisation from the first and last alone, which was a confounded
-# pair — recorded here so the next reader does not repeat it.
+# So it is the COMBINATION — a private caller reaching into another organisation — and neither
+# condition alone predicts it. `secrets: inherit` and a named secret behave identically; the form
+# is not what does it, and the caller's own job demonstrably holds the value.
 #
 # `codecov/codecov-action` is the existence proof for the fix: a different organisation's
 # action, receiving that same token without trouble, in the very run whose reusable-workflow

@@ -15,7 +15,7 @@ name: Sharded tests
 #                           jobs:
 #                             test:
 #                               uses: QAtlasHub/TestShards.jl/.github/workflows/sharded-tests.yml@main
-#                               with: { shards: 8, runner: '["self-hosted","rosina"]' }
+#                               with: { shards: 8, runner: '["self-hosted","my-pool"]' }
 #                               secrets:
 #                                 CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 #
@@ -48,7 +48,7 @@ on:
         type: number
         default: 8
       runner:
-        description: 'runs-on as JSON: ''"ubuntu-latest"'' or ''["self-hosted","rosina"]'''
+        description: 'runs-on as JSON: ''"ubuntu-latest"'' or ''["self-hosted","my-pool"]'''
         type: string
         default: '"ubuntu-latest"'
       helper-runner:
@@ -296,8 +296,8 @@ jobs:
           # shared ~/.julia. A runner whose FRONT depot lacks the registry resolves from the
           # shared clone, which the plain call never touches; the result is "some shards green,
           # one red on the same commit", and waiting after a registration does not help because
-          # the staleness is per runner. Diagnosed in lab-sotashimozono/ParaLinearAlgebra#400,
-          # which cost three PRs of split results before anyone printed the depot layout.
+          # the staleness is per runner. It took three rounds of split results to find, because
+          # nothing points at the depot layout until you print it.
           #
           # JULIA_DEPOT_PATH as a command PREFIX, never `setenv` from inside Julia — that
           # REPLACES the environment and takes HOME with it, losing git credentials for a private
@@ -432,8 +432,8 @@ jobs:
           # shared ~/.julia. A runner whose FRONT depot lacks the registry resolves from the
           # shared clone, which the plain call never touches; the result is "some shards green,
           # one red on the same commit", and waiting after a registration does not help because
-          # the staleness is per runner. Diagnosed in lab-sotashimozono/ParaLinearAlgebra#400,
-          # which cost three PRs of split results before anyone printed the depot layout.
+          # the staleness is per runner. It took three rounds of split results to find, because
+          # nothing points at the depot layout until you print it.
           #
           # JULIA_DEPOT_PATH as a command PREFIX, never `setenv` from inside Julia — that
           # REPLACES the environment and takes HOME with it, losing git credentials for a private

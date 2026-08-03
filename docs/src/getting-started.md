@@ -76,19 +76,19 @@ The failure is quiet by construction. Codecov rejects a tokenless upload during 
 which happens after the uploader has already succeeded at queueing it, so the step goes green and
 coverage simply stops arriving.
 
-**Which case you are in is decided by the caller's visibility.** Three callers of the same
-reusable, same named `secrets:` block, varying one thing at a time:
+**You are in it when your repository is private *and* this workflow is in another organisation.**
+Measured across four callers of one reusable, same named `secrets:` block, one variable at a time:
 
-| caller | organisation | visibility | token |
-|---|---|---|---|
-| `QAtlasHub/DataVault.jl` | same as the reusable | public | **arrives** |
-| `lab-sotashimozono/ITensorModels.jl` | different | public | **arrives** |
-| `lab-sotashimozono/ITensorAD.jl` | different | private | **empty** |
+| caller's organisation | caller's visibility | token |
+|---|---|---|
+| same as the callee | public | **arrives** |
+| different | public | **arrives** |
+| same as the callee | private | **arrives** |
+| different | **private** | **empty** |
 
-The first two differ only in the organisation and agree, so the organisation is not it. The last
-two differ only in visibility and disagree. **A public repository can pass its secret to this
-workflow; a private one cannot** — and the private one's token was verifiably present in its own
-job, so this is the call losing it and not a missing secret.
+Neither condition alone predicts it — it is the combination. The failing caller's token was
+verifiably present in its own job, so it is the call losing it and not a missing secret, and
+`secrets: inherit` versus a named secret makes no difference.
 
 There is a second, unrelated way to end up with no token, worth ruling out first: an
 **organisation** secret does not reach a **private** repository on a free plan at all, so such a
