@@ -107,8 +107,8 @@ on:
       prebuild:
         description: >
           Precompile ONCE in its own job and hand the result to the shards, instead of every
-          shard precompiling the same commit for itself. Measured on QAtlas.jl, the package
-          under test costs ~219s of precompilation inside EVERY shard's test step — 16 shards,
+          shard precompiling the same commit for itself. Measured on a 16-shard suite, the
+          package under test cost ~219s of precompilation inside EVERY shard's test step —
           ~3,400 runner-seconds a run, for one answer.
           It is a TRADE, not a win: the build is serialised in front of the shards, so it buys
           runner time and costs a little wall clock. Off by default; which side you want is a
