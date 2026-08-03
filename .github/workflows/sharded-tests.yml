@@ -478,17 +478,21 @@ jobs:
       # still succeeds. So say it here, where the cause is knowable, rather than leaving someone
       # to notice months later that coverage stopped arriving.
       #
-      # Measured on lab-sotashimozono/ITensorAD.jl#20: a caller in ANOTHER ORGANISATION wrote
-      # `secrets: inherit`, and this workflow saw an empty CODECOV_TOKEN — the codecov step's
-      # resolved inputs carried no `token:` at all — though the token was present there as both
-      # a repo secret and an org secret. Naming the secret in the caller fixes it.
+      # Measured on lab-sotashimozono/ITensorAD.jl#20, a caller in ANOTHER ORGANISATION:
       #
-      # Not asserted: which of caller-is-private / caller-is-another-org / free-plan secret
-      # policy is doing it. `secrets: inherit` demonstrably DOES work for this repository's own
-      # calls into QAtlasHub/.github, so "inherit never crosses repositories" is not the rule.
-      # What is established is the failure and the fix, which is what this warning needs.
+      #   its own job          CODECOV_TOKEN present (36 chars)
+      #   this workflow        the codecov step's resolved inputs carry no `token:` at all
       #
-      # This repository never hit it because it dogfoods through a local `./` reference.
+      # with the secret NAMED, not inherited — `secrets: inherit` behaved identically, so the
+      # form is not what does it. The secret exists in the caller and does not survive the
+      # crossing. This repository never hit it because it dogfoods through a local `./`
+      # reference, and its own calls into QAtlasHub/.github stay inside one organisation.
+      #
+      # Hence `actions/upload-coverage`: an ACTION runs inside the caller's job, so the caller's
+      # token never has to cross anything. `codecov/codecov-action` itself is the existence
+      # proof — it is a different organisation's action and it received the token fine, in the
+      # very run whose reusable-workflow call did not.
+      #
       # The emptiness is tested in the shell, not in `if:`. The `secrets` context is not
       # available to a step-level condition — it would evaluate to the empty string whatever the
       # secret holds, and this warning would fire on every run that has a perfectly good token.
@@ -499,8 +503,8 @@ jobs:
         run: |
           set -euo pipefail
           if [ -z "${TOKEN:-}" ]; then
-            echo "::warning::No CODECOV_TOKEN reached this workflow. The upload will be rejected during processing (\"Token required - not valid tokenless upload\") WITHOUT failing this job. If the caller wrote 'secrets: inherit', that is the cause — name the secret instead."
-            echo "**No CODECOV_TOKEN** — coverage was merged but not uploaded." >> "$GITHUB_STEP_SUMMARY"
+            echo "::warning::No CODECOV_TOKEN reached this workflow, so the upload will be rejected during processing (\"Token required - not valid tokenless upload\") WITHOUT failing this job. A secret does not always survive the call into a reusable workflow, measured across an organisation boundary, and naming it instead of inheriting it does not change that. The merged report is published as the 'testshards-lcov' artifact — upload it from your own repository with QAtlasHub/TestShards.jl/actions/upload-coverage@main, where your token works."
+            echo "**No CODECOV_TOKEN** — coverage was merged but not uploaded. The merged report is in the \`testshards-lcov\` artifact." >> "$GITHUB_STEP_SUMMARY"
           else
             echo "CODECOV_TOKEN is present."
           fi
@@ -516,6 +520,20 @@ jobs:
           disable_search: true
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: false
+
+      # Published whether or not the upload above worked, and it is what makes the failure
+      # recoverable rather than merely visible: the merge is the expensive, easy-to-get-wrong
+      # part, and it has already happened by here. A caller whose token does not reach this
+      # workflow can hand this artifact to `actions/upload-coverage` in a job of its own and
+      # lose nothing.
+      - name: Publish the merged report
+        if: ${{ inputs.coverage }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: testshards-lcov
+          path: lcov.info
+          retention-days: 7
+          if-no-files-found: error
 
       # NOT best-effort, and not conditional on `steal`. Under assignment this is a theorem —
       # every shard computes the same total function, so a unit nobody runs cannot exist — and

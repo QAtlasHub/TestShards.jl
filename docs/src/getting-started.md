@@ -60,6 +60,51 @@ jobs:
     recording the timing history needs write access. Granting less makes the run fail to
     **start**, with no log to read.
 
+### If your Codecov token does not arrive
+
+Check the `collect` job for this warning:
+
+```
+No CODECOV_TOKEN reached this workflow, so the upload will be rejected during processing
+```
+
+A secret does not always survive the call into a reusable workflow. Measured across an
+organisation boundary: the token was present in the caller's own job and absent inside the called
+workflow, **with the secret named rather than inherited** — the form makes no difference.
+
+The failure is quiet by construction. Codecov rejects a tokenless upload during *processing*,
+which happens after the uploader has already succeeded at queueing it, so the step goes green and
+coverage simply stops arriving.
+
+Nothing is lost, because the merge has already happened: the report is published as the
+`testshards-lcov` artifact. Upload it from your own repository, where your token works, in a job
+of its own:
+
+```yaml
+  coverage:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: QAtlasHub/TestShards.jl/actions/upload-coverage@main
+        with:
+          codecov-token: ${{ secrets.CODECOV_TOKEN }}
+```
+
+An **action** runs inside your job, so the token never crosses anything. `codecov/codecov-action`
+is the proof that this works — another organisation's action, receiving that same token without
+trouble, in the very run whose reusable-workflow call did not.
+
+| input | default | |
+|---|---|---|
+| `codecov-token` | — | required |
+| `artifact` | `testshards-lcov` | only change it if you renamed it |
+| `fail-on-error` | `'false'` | fail the job on a failed upload |
+| `flags` | `''` | Codecov flags, comma-separated |
+
+Give it its own job. It checks out the repository — Codecov needs the tree to build the report's
+file network, and an upload without one is rejected during processing, silently — and a checkout
+cleans the workspace.
+
 ### Inputs
 
 Every input has a default, so `shards` is the only one most suites ever set.
