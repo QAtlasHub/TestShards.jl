@@ -63,9 +63,9 @@ on:
       coverage-upload:
         description: >
           Whether this workflow sends the merged report to Codecov. Set it false when you upload
-          it yourself with `actions/upload-coverage` — a caller in a DIFFERENT ORGANISATION has
-          to, because a secret does not survive the call into a reusable workflow across that
-          boundary (measured; a repository boundary is fine).
+          it yourself with `actions/upload-coverage` — a PRIVATE caller has to, because a secret
+          does not survive the call into a reusable workflow from one (measured against two
+          public callers, one of them in another organisation, which both receive it).
 
           Without this input such a caller gets a warning about a missing token on every single
           run, for a token it deliberately did not send — which is how a warning stops being
@@ -485,53 +485,37 @@ jobs:
             end
             println("Coverage ", pct, "% (", covered, "/", total, " lines) over ", length(fc), " files.")'
 
-      # `fail_ci_if_error: false` below is deliberate — a flaky upload must not redden a green
-      # suite — but it makes a PERMANENTLY broken upload indistinguishable from a working one
-      # from outside the log: Codecov rejects a tokenless upload during processing, and the step
-      # still succeeds. So say it here, where the cause is knowable, rather than leaving someone
-      # to notice months later that coverage stopped arriving.
+      # An empty token is a CERTAIN failure, not a flaky one: Codecov rejects a tokenless upload
+      # during server-side processing, after the uploader has already succeeded at queueing it.
+      # So it is not attempted — the attempt would only add a red `failed:` line under a green
+      # check and send nothing.
       #
-      # Measured on lab-sotashimozono/ITensorAD.jl#20, a caller in ANOTHER ORGANISATION:
-      #
-      #   its own job          CODECOV_TOKEN present (36 chars)
-      #   this workflow        the codecov step's resolved inputs carry no `token:` at all
-      #
-      # with the secret NAMED, not inherited — `secrets: inherit` behaved identically, so the
-      # form is not what does it. The secret exists in the caller and does not survive the
-      # crossing. This repository never hit it because it dogfoods through a local `./`
-      # reference, and its own calls into QAtlasHub/.github stay inside one organisation.
-      #
-      # Hence `actions/upload-coverage`: an ACTION runs inside the caller's job, so the caller's
-      # token never has to cross anything. `codecov/codecov-action` itself is the existence
-      # proof — it is a different organisation's action and it received the token fine, in the
-      # very run whose reusable-workflow call did not.
+      # Recorded as one plain line rather than a `::warning::`. A repository that has decided not
+      # to hold a Codecov token does not need an annotation about it on every run, and an
+      # annotation nobody acts on is how annotations stop being read. Nothing is lost but the
+      # sending: the percentage is already in this job's `Coverage` step summary, and the report
+      # itself is published as the `testshards-lcov` artifact.
       #
       # The emptiness is tested in the shell, not in `if:`. The `secrets` context is not
       # available to a step-level condition — it would evaluate to the empty string whatever the
-      # secret holds, and this warning would fire on every run that has a perfectly good token.
-      - name: Say so if there is no Codecov token
+      # secret holds, and this would skip the upload on every run that has a perfectly good
+      # token, which is the failure direction that resembles success.
+      - name: Is there a token?
         id: token
         if: ${{ inputs.coverage && inputs.coverage-upload }}
         env:
           TOKEN: ${{ secrets.CODECOV_TOKEN }}
         run: |
           set -euo pipefail
-          echo "have=$([ -n "${TOKEN:-}" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
           if [ -z "${TOKEN:-}" ]; then
-            echo "::warning::No CODECOV_TOKEN reached this workflow, so the upload will be rejected during processing (\"Token required - not valid tokenless upload\") WITHOUT failing this job. A secret does not always survive the call into a reusable workflow, measured across an organisation boundary, and naming it instead of inheriting it does not change that. The merged report is published as the 'testshards-lcov' artifact — upload it from your own repository with QAtlasHub/TestShards.jl/actions/upload-coverage@main, where your token works."
-            echo "**No CODECOV_TOKEN** — coverage was merged but not uploaded. The merged report is in the \`testshards-lcov\` artifact." >> "$GITHUB_STEP_SUMMARY"
+            echo "have=false" >> "$GITHUB_OUTPUT"
+            echo "No CODECOV_TOKEN reached this workflow, so the report is not being sent. It is merged and published as the 'testshards-lcov' artifact either way, and the percentage is in the Coverage summary above."
+            echo "A PRIVATE repository cannot pass a secret into a reusable workflow — measured against two PUBLIC callers, one of them in another organisation, which both receive it. Upload from your own repository with QAtlasHub/TestShards.jl/actions/upload-coverage and pass coverage-upload: false here. (A private repo also needs a CODECOV_TOKEN of its own: an organisation secret does not reach one on a free plan.)"
+            echo "Coverage merged but **not uploaded** — no Codecov token. The percentage is in the \`Coverage\` summary above; the report itself is the \`testshards-lcov\` artifact." >> "$GITHUB_STEP_SUMMARY"
           else
-            echo "CODECOV_TOKEN is present."
+            echo "have=true" >> "$GITHUB_OUTPUT"
           fi
 
-      # Skipped, not attempted-and-failed, when no token arrived. An upload that CANNOT succeed
-      # still logs a `failed:` line every run, which trains a reader to skim past exactly the
-      # line that would matter on the day a real upload breaks. The step above already said what
-      # is wrong and where the report is, once, as a warning.
-      #
-      # The condition reads a step OUTPUT rather than the secret. `secrets` is not available to a
-      # step-level `if:`, where it would evaluate to the empty string whatever the secret holds —
-      # which would skip the upload on every run that has a perfectly good token.
       - uses: codecov/codecov-action@v7
         if: ${{ inputs.coverage && inputs.coverage-upload && steps.token.outputs.have == 'true' }}
         continue-on-error: true          # a flaky upload must not redden a green suite

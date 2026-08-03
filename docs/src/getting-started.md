@@ -68,18 +68,32 @@ Check the `collect` job for this warning:
 No CODECOV_TOKEN reached this workflow, so the upload will be rejected during processing
 ```
 
-A secret does not always survive the call into a reusable workflow. Measured across an
-organisation boundary: the token was present in the caller's own job and absent inside the called
-workflow, **with the secret named rather than inherited** — the form makes no difference.
+A secret does not always survive the call into a reusable workflow: the token was present in the
+caller's own job and absent inside the called workflow, **with the secret named rather than
+inherited** — the form makes no difference.
 
 The failure is quiet by construction. Codecov rejects a tokenless upload during *processing*,
 which happens after the uploader has already succeeded at queueing it, so the step goes green and
 coverage simply stops arriving.
 
-**Which case you are in is decided by the organisation, not the repository.** Measured both ways
-against the same reusable and the same named `secrets:` block: a caller in the *same* organisation
-gets the token and uploads normally; a caller in a *different* one gets nothing. A repository
-boundary is fine.
+**Which case you are in is decided by the caller's visibility.** Three callers of the same
+reusable, same named `secrets:` block, varying one thing at a time:
+
+| caller | organisation | visibility | token |
+|---|---|---|---|
+| `QAtlasHub/DataVault.jl` | same as the reusable | public | **arrives** |
+| `lab-sotashimozono/ITensorModels.jl` | different | public | **arrives** |
+| `lab-sotashimozono/ITensorAD.jl` | different | private | **empty** |
+
+The first two differ only in the organisation and agree, so the organisation is not it. The last
+two differ only in visibility and disagree. **A public repository can pass its secret to this
+workflow; a private one cannot** — and the private one's token was verifiably present in its own
+job, so this is the call losing it and not a missing secret.
+
+There is a second, unrelated way to end up with no token, worth ruling out first: an
+**organisation** secret does not reach a **private** repository on a free plan at all, so such a
+repo has an empty token in *every* job of its own. That one is fixed by giving the repository its
+own secret, not by moving the upload.
 
 Nothing is lost, because the merge has already happened: the report is published as the
 `testshards-lcov` artifact. Upload it from your own repository, where your token works, in a job
