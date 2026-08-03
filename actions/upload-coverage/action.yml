@@ -1,0 +1,73 @@
+name: Upload TestShards coverage
+description: >
+  Upload the merged coverage report produced by sharded-tests.yml to Codecov, from the caller's
+  own repository — for when the caller's CODECOV_TOKEN does not reach the reusable workflow.
+
+# WHY THIS IS AN ACTION AND NOT PART OF THE WORKFLOW
+#
+# An action's steps run inside the CALLING job, so a secret passed to it never crosses anything.
+# A reusable workflow's jobs do not, and a secret does not always survive that call: measured on
+# lab-sotashimozono/ITensorAD.jl#20, the token was present in the caller's own job (36 chars)
+# and absent inside the called workflow, with the secret NAMED rather than inherited — the form
+# made no difference. The two calls differ in crossing an organisation boundary.
+#
+# `codecov/codecov-action` is the existence proof for the fix: a different organisation's
+# action, receiving that same token without trouble, in the very run whose reusable-workflow
+# call did not.
+#
+# So the split is not arbitrary. The workflow owns what needs JOBS — the shard matrix, and
+# merging N shards' counters into one report. This owns the last step, which needs a SECRET.
+
+inputs:
+  codecov-token:
+    description: 'Your CODECOV_TOKEN. Pass `${{ secrets.CODECOV_TOKEN }}` from the caller.'
+    required: true
+  artifact:
+    description: 'Artifact holding the merged report. Only change this if you renamed it.'
+    required: false
+    default: testshards-lcov
+  fail-on-error:
+    description: >
+      Fail the job if the upload fails. Off by default, matching the workflow: a flaky upload
+      should not redden a green suite. The step says so either way.
+    required: false
+    default: 'false'
+  flags:
+    description: 'Codecov flags, comma-separated. Empty for none.'
+    required: false
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    # A checkout is not optional, and its absence is invisible from the run. Codecov builds the
+    # report's file "network" from the checked-out tree, and a report uploaded without one is
+    # rejected during server-side PROCESSING — which succeeds as far as the uploader can see,
+    # because the upload is only queued. This is the same failure the workflow's own collect job
+    # was fixed for; do not "simplify" it away.
+    #
+    # Unconditional, and therefore FIRST: checkout cleans the workspace, so anything this action
+    # fetches has to come after it. Give it a job of its own rather than appending it to one
+    # that has already built something there.
+    - uses: actions/checkout@v7
+
+    - uses: actions/download-artifact@v8
+      with:
+        name: ${{ inputs.artifact }}
+
+    - shell: bash
+      run: |
+        set -euo pipefail
+        [ -s lcov.info ] || { echo "::error::${{ inputs.artifact }} contained no lcov.info — did the sharded run finish with coverage on?"; exit 1; }
+        echo "Merged report: $(grep -c '^SF:' lcov.info) source files."
+
+    - uses: codecov/codecov-action@v7
+      continue-on-error: ${{ inputs.fail-on-error != 'true' }}
+      with:
+        files: lcov.info
+        # Without this the CLI also auto-discovers anything else lying around and turns one
+        # merged report into several uploads of the same coverage.
+        disable_search: true
+        token: ${{ inputs.codecov-token }}
+        flags: ${{ inputs.flags }}
+        fail_ci_if_error: ${{ inputs.fail-on-error }}

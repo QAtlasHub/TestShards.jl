@@ -26,7 +26,8 @@ jobs:
     uses: QAtlasHub/TestShards.jl/.github/workflows/sharded-tests.yml@main
     with:
       shards: 8
-    secrets: inherit
+    secrets:
+      CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 ```
 
 Each `include` is one shardable piece — including the ones the `for` loop produces. That is the
