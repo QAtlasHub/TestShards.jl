@@ -9,7 +9,18 @@ description: >
 # A reusable workflow's jobs do not, and a secret does not always survive that call: measured on
 # lab-sotashimozono/ITensorAD.jl#20, the token was present in the caller's own job (36 chars)
 # and absent inside the called workflow, with the secret NAMED rather than inherited — the form
-# made no difference. The two calls differ in crossing an organisation boundary.
+# made no difference.
+#
+# What decides it is the caller's VISIBILITY, not the organisation. Three callers, same reusable,
+# same named `secrets:` block, one variable at a time:
+#
+#   QAtlasHub/DataVault.jl                same org, PUBLIC     arrives
+#   lab-sotashimozono/ITensorModels.jl    other org, PUBLIC    arrives
+#   lab-sotashimozono/ITensorAD.jl        other org, PRIVATE   empty
+#
+# The first two differ only in the organisation and agree; the last two differ only in visibility
+# and do not. I asserted the organisation from the first and last alone, which was a confounded
+# pair — recorded here so the next reader does not repeat it.
 #
 # `codecov/codecov-action` is the existence proof for the fix: a different organisation's
 # action, receiving that same token without trouble, in the very run whose reusable-workflow
@@ -25,8 +36,12 @@ inputs:
     # context an action has. Spelling out the intended value cost the whole action —
     # "Unrecognized named-value: 'secrets'" at load, so every step failed before the first one
     # ran, in the consumer rather than here. The docs are where the example belongs.
-    description: 'Your Codecov token, passed by the caller from its own secrets.'
-    required: true
+    description: >
+      Your Codecov token, passed by the caller from its own secrets. An EMPTY value is a
+      supported state, not a mistake: the report is merged and published either way, and only
+      the sending is skipped. Hence not `required`.
+    required: false
+    default: ''
   artifact:
     description: 'Artifact holding the merged report. Only change this if you renamed it.'
     required: false
@@ -52,15 +67,47 @@ inputs:
 runs:
   using: composite
   steps:
+    # An empty token is a CERTAIN failure, not a flaky one: Codecov rejects a tokenless upload
+    # during server-side processing, after the uploader has already succeeded at queueing it, so
+    # the attempt costs a red `failed:` line in the log under a green check and achieves nothing.
+    #
+    # So it is not attempted. This step records the reason as one plain line and sets an output
+    # the upload below is gated on. Deliberately NOT a `::warning::`: for a repository that has
+    # decided not to hold a Codecov token, a per-run annotation is nagging about a settled
+    # decision, and an annotation nobody acts on is how annotations stop being read. The line is
+    # in the log for whoever goes looking, the step summary says it once, and the merged report
+    # is still published as an artifact — so nothing is lost except the sending.
+    #
+    # Two independent things produce an empty token, and the message names both because they
+    # have different fixes: an ORGANISATION secret is withheld from a PRIVATE repository on a
+    # free plan (so a private repo needs its own), and a secret does not always survive the call
+    # into a reusable workflow in another repository (so the caller has to do the sending, which
+    # is what this action is for).
+    - name: Is there a token?
+      id: token
+      shell: bash
+      env:
+        TOKEN: ${{ inputs.codecov-token }}
+      run: |
+        set -euo pipefail
+        if [ -z "${TOKEN:-}" ]; then
+          echo "have=false" >> "$GITHUB_OUTPUT"
+          echo "No Codecov token, so the report is not being sent. It is merged and published as the '${{ inputs.artifact }}' artifact either way."
+          echo "Two things produce an empty token here, and they have different fixes. (1) An ORGANISATION secret does not reach a PRIVATE repository on a free plan, so such a repo needs a CODECOV_TOKEN of its own. (2) A PRIVATE repository cannot pass a secret into a reusable workflow at all, which is what this action exists to work around — if you are seeing this from inside this action, (1) is the one to check."
+          echo "Coverage merged but **not uploaded** — no Codecov token. The percentage is in this run's \`Coverage\` summary above, and the report itself is the \`${{ inputs.artifact }}\` artifact." >> "$GITHUB_STEP_SUMMARY"
+        else
+          echo "have=true" >> "$GITHUB_OUTPUT"
+        fi
+
     # A checkout is not optional, and its absence is invisible from the run. Codecov builds the
     # report's file "network" from the checked-out tree, and a report uploaded without one is
     # rejected during server-side PROCESSING — which succeeds as far as the uploader can see,
     # because the upload is only queued. This is the same failure the workflow's own collect job
     # was fixed for; do not "simplify" it away.
     #
-    # Unconditional, and therefore FIRST: checkout cleans the workspace, so anything this action
-    # fetches has to come after it. Give it a job of its own rather than appending it to one
-    # that has already built something there.
+    # Unconditional, and therefore FIRST among the steps that touch the workspace: checkout
+    # cleans it, so anything this action fetches has to come after. Give this action a job of its
+    # own rather than appending it to one that has already built something there.
     - uses: actions/checkout@v7
 
     - uses: actions/download-artifact@v8
@@ -74,6 +121,7 @@ runs:
         echo "Merged report: $(grep -c '^SF:' lcov.info) source files."
 
     - uses: codecov/codecov-action@v7
+      if: ${{ steps.token.outputs.have == 'true' }}
       continue-on-error: ${{ inputs.fail-on-error != 'true' }}
       with:
         files: lcov.info
