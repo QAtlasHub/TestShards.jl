@@ -74,8 +74,8 @@ on:
 
           Without this input such a caller gets a warning about a missing token on every single
           run, for a token it deliberately did not send — which is how a warning stops being
-          read. The merge still happens and `testshards-lcov` is still published either way;
-          only the sending is yours.
+          read. The merge still happens and the `<artifact-prefix>-lcov` artifact is still
+          published either way; only the sending is yours.
         type: boolean
         default: true
       diagnose:
@@ -137,6 +137,28 @@ on:
           Only scales the reported cost; the knee is the same either way.
         type: string
         default: '0'
+      artifact-prefix:
+        description: >
+          Prefix for every artifact this run publishes. Set it when ONE workflow calls this
+          more than once — a matrix over Julia
+          versions, say — because the two calls share a run, and without a discriminator they
+          collide on `upload-artifact`, which rejects a duplicate name. The second call then
+          fails on an upload AFTER its tests passed.
+
+          The quieter half: both calls would also record to the same `ci-timings` branch, having
+          measured DIFFERENT configurations. Whichever finishes last wins, silently, and every
+          later run is planned against a history that is half one version and half the other.
+          Nothing fails; the balance just stops meaning what it says. Give each call its own
+          prefix, or use `record-timings: false` on the ones that should not own the history.
+        type: string
+        default: 'testshards'
+      record-timings:
+        description: >
+          Whether this call records its measurements to the timing branch. Turn it off on the
+          secondary legs of a multi-version matrix: "both legs record" is not expressible as
+          anything correct, since they measure different configurations.
+        type: boolean
+        default: true
       registries:
         description: >
           Registries the package resolves from, one per line — a bare name for a registry Pkg
@@ -248,7 +270,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: testshards-timings
+          name: ${{ inputs.artifact-prefix }}-timings
           path: timings.tsv
           retention-days: 1
           if-no-files-found: error
@@ -331,7 +353,7 @@ jobs:
 
       - uses: actions/upload-artifact@v7
         with:
-          name: testshards-prebuild
+          name: ${{ inputs.artifact-prefix }}-prebuild
           path: compiled.tgz
           retention-days: 1
           if-no-files-found: error
@@ -376,7 +398,7 @@ jobs:
       # the comment in `labels`; the reasoning lives there, next to the fetch.
       - uses: actions/download-artifact@v8
         with:
-          name: testshards-timings
+          name: ${{ inputs.artifact-prefix }}-timings
           path: .testshards-timings
 
       - name: Report what this shard was given
@@ -398,7 +420,7 @@ jobs:
       - uses: actions/download-artifact@v8
         if: ${{ inputs.prebuild }}
         with:
-          name: testshards-prebuild
+          name: ${{ inputs.artifact-prefix }}-prebuild
       - name: Adopt the precompiled cache
         if: ${{ inputs.prebuild }}
         run: |
@@ -502,7 +524,7 @@ jobs:
         if: ${{ inputs.coverage }}
         uses: actions/upload-artifact@v7
         with:
-          name: testshards-coverage-${{ matrix.sid }}
+          name: ${{ inputs.artifact-prefix }}-coverage-${{ matrix.sid }}
           path: .ts-cov
           retention-days: 1
           if-no-files-found: error
@@ -514,7 +536,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: testshards-out-${{ matrix.sid }}
+          name: ${{ inputs.artifact-prefix }}-out-${{ matrix.sid }}
           path: ${{ inputs.test-root }}/.ci-out/*
           retention-days: 7
           if-no-files-found: ignore
@@ -539,7 +561,7 @@ jobs:
       - uses: actions/download-artifact@v8
         with:
           path: parts
-          pattern: testshards-*
+          pattern: ${{ inputs.artifact-prefix }}-*
 
       # Both reporting steps below are TestShards calling itself, so install it once. Doing the
       # work in the package rather than in this file is the point: a merge written as a step
@@ -644,7 +666,7 @@ jobs:
         if: ${{ inputs.coverage }}
         uses: actions/upload-artifact@v4
         with:
-          name: testshards-lcov
+          name: ${{ inputs.artifact-prefix }}-lcov
           path: lcov.info
           retention-days: 7
           if-no-files-found: error
@@ -693,7 +715,7 @@ jobs:
       - name: Upload the merged records
         uses: actions/upload-artifact@v7
         with:
-          name: testshards-records
+          name: ${{ inputs.artifact-prefix }}-records
           path: records.jsonl
           retention-days: 30
           if-no-files-found: warn
@@ -725,7 +747,7 @@ jobs:
   timings:
     name: Record timing history
     needs: test
-    if: ${{ github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && needs.test.result == 'success' }}
+    if: ${{ inputs.record-timings && (github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && needs.test.result == 'success') }}
     runs-on: ${{ fromJSON(inputs.helper-runner) }}
     permissions:
       contents: write                   # force-pushes the ci-timings orphan branch
@@ -734,7 +756,7 @@ jobs:
       - uses: actions/download-artifact@v8
         with:
           path: parts
-          pattern: testshards-out-*
+          pattern: ${{ inputs.artifact-prefix }}-out-*
       # This run REPLACES the history rather than being merged into it. On a green run of the
       # default branch every unit ran exactly once across the shards, so this run's timings are
       # not an update to the suite — they ARE the suite. Merging instead keeps a row for every
