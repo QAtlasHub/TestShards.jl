@@ -76,19 +76,19 @@ The failure is quiet by construction. Codecov rejects a tokenless upload during 
 which happens after the uploader has already succeeded at queueing it, so the step goes green and
 coverage simply stops arriving.
 
-**Which case you are in is decided by the caller's visibility.** Three callers of the same
-reusable, same named `secrets:` block, varying one thing at a time:
+**You are in it when your repository is private *and* this workflow is in another organisation.**
+Measured across four callers of one reusable, same named `secrets:` block, one variable at a time:
 
-| caller | organisation | visibility | token |
-|---|---|---|---|
-| `QAtlasHub/DataVault.jl` | same as the reusable | public | **arrives** |
-| `lab-sotashimozono/ITensorModels.jl` | different | public | **arrives** |
-| `lab-sotashimozono/ITensorAD.jl` | different | private | **empty** |
+| caller's organisation | caller's visibility | token |
+|---|---|---|
+| same as the callee | public | **arrives** |
+| different | public | **arrives** |
+| same as the callee | private | **arrives** |
+| different | **private** | **empty** |
 
-The first two differ only in the organisation and agree, so the organisation is not it. The last
-two differ only in visibility and disagree. **A public repository can pass its secret to this
-workflow; a private one cannot** — and the private one's token was verifiably present in its own
-job, so this is the call losing it and not a missing secret.
+Neither condition alone predicts it — it is the combination. The failing caller's token was
+verifiably present in its own job, so it is the call losing it and not a missing secret, and
+`secrets: inherit` versus a named secret makes no difference.
 
 There is a second, unrelated way to end up with no token, worth ruling out first: an
 **organisation** secret does not reach a **private** repository on a free plan at all, so such a
@@ -157,9 +157,9 @@ Every input has a default, so `shards` is the only one most suites ever set.
 
 #### `registries` — for a project that resolves from an overlay
 
-Only needed when your dependencies do not all come from General. Each line is either a name Pkg
-knows or a clone URL, and each is added **only if it is not already reachable**, because
-re-adding an existing registry errors rather than doing nothing:
+Each line is either a name Pkg knows or a clone URL. Each is added **only if it is not already
+reachable** — re-adding an existing registry errors rather than doing nothing — and then **every
+registry in every depot is refreshed**:
 
 ```yaml
     with:
@@ -169,6 +169,19 @@ re-adding an existing registry errors rather than doing nothing:
 ```
 
 Registries are depot-level, so this reaches inside `Pkg.test`'s sandbox.
+
+Set it even for a package that resolves entirely from General, if you run on a persistent
+self-hosted depot. **Present is not the same as current**, and the two fail differently: a
+missing registry stops the resolve, while a stale one resolves fine and simply cannot see a
+version registered since it was last pulled.
+
+!!! warning "One `Pkg.Registry.update()` is not enough"
+    It manages `DEPOT_PATH[1]` only, and a self-hosted runner can carry the same registry twice —
+    a per-runner front depot and a shared `~/.julia`. A runner whose *front* depot lacks the
+    registry resolves from the shared clone, which the plain call never touches. The result is
+    "some shards green, one red on the same commit", and waiting after a registration does not
+    help, because the staleness is per runner. This workflow therefore refreshes each depot in
+    turn.
 
 !!! warning "On a self-hosted pool, a missing registry fails *partially*"
     The depot is persistent per box, and the boxes need not carry the same registries. Whichever
