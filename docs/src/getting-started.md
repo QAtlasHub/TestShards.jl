@@ -78,13 +78,29 @@ Every input has a default, so `shards` is the only one most suites ever set.
 | `prebuild` | `false` | precompile once and hand it to the shards — **hosted runners only**, see [Balancing](balancing.md) |
 | `concurrency-budget` | `'0'` | how many jobs your *account* can run at once; `0` = unknown |
 | `fixed-cost-seconds` | `'0'` | per-shard overhead, for the cost figures (see [Balancing](balancing.md)) |
-| `testshards-spec` | a git URL | where the merge jobs install TestShards from |
+| `registries` | `''` | registries to add before resolving, one per line — see below |
+| `testshards-spec` | `'name="TestShards"'` | where the merge jobs install TestShards from |
 
-!!! note "`testshards-spec` follows `main` today"
-    The merge and reporting jobs are themselves TestShards, so the workflow installs the package
-    to run them. Until this package is in the General registry that spec is a git URL pointing at
-    `main`, which means your CI follows this repository's default branch. Pin it if you would
-    rather not: `testshards-spec: 'url="https://github.com/QAtlasHub/TestShards.jl", rev="v0.3.14"'`.
+#### `registries` — for a project that resolves from an overlay
+
+Only needed when your dependencies do not all come from General. Each line is either a name Pkg
+knows or a clone URL, and each is added **only if it is not already reachable**, because
+re-adding an existing registry errors rather than doing nothing:
+
+```yaml
+    with:
+      registries: |
+        General
+        https://github.com/my-org/MyRegistry.git
+```
+
+Registries are depot-level, so this reaches inside `Pkg.test`'s sandbox.
+
+!!! warning "On a self-hosted pool, a missing registry fails *partially*"
+    The depot is persistent per box, and the boxes need not carry the same registries. Whichever
+    ones happen to have run a job that added yours have it and the rest do not — so the same
+    commit resolves on some shards and dies on others with `expected package X to be registered`.
+    It reads as flake and is not.
 
 The workflow exposes an `All shards passed` job — that is the one to require in branch
 protection, rather than the individual shards, whose names change with `shards`.

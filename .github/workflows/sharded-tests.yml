@@ -118,10 +118,29 @@ on:
           Only scales the reported cost; the knee is the same either way.
         type: string
         default: '0'
-      testshards-spec:
-        description: 'How the collect job installs TestShards for its reporting steps (a Pkg.add argument list).'
+      registries:
+        description: >
+          Registries the package resolves from, one per line — a bare name for a registry Pkg
+          knows (`General`) or a clone URL for an overlay. Each is added only if it is not
+          already reachable, because re-adding an existing registry ERRORS rather than
+          no-opping. Registries are depot-level, so adding them here reaches inside
+          `Pkg.test`'s sandbox.
+
+          Needed by a repository whose dependencies resolve from a private overlay instead of
+          `[sources]`. On a self-hosted pool the depot is persistent PER BOX and the boxes do
+          not all carry the same registries, so the failure without this is PARTIAL — some
+          shards resolve and others die with `expected package X to be registered`, on one
+          commit. That reads as flake and is not.
         type: string
-        default: 'url="https://github.com/QAtlasHub/TestShards.jl"'
+        default: ''
+      testshards-spec:
+        description: >
+          How the collect job installs TestShards for its reporting steps (a `Pkg.add` argument
+          list). The default takes the registered package, so a consumer's CI follows General
+          rather than this repository's default branch. Override it to test an unreleased
+          change: `url="https://github.com/QAtlasHub/TestShards.jl", rev="my-branch"`.
+        type: string
+        default: 'name="TestShards"'
     secrets:
       CODECOV_TOKEN:
         required: false
@@ -166,6 +185,34 @@ jobs:
         with:
           cache-name: testshards
           include-matrix: 'false'
+      # Same step as the one in `test` below, and it has to be: this job resolves the same
+      # project, so a registry missing here fails the precompile instead of the tests. Kept as
+      # two copies rather than a composite action because an action would be referenced by its
+      # own ref, which is a second thing to keep current for eleven lines of script.
+      - name: Ensure the registries this project resolves from
+        if: ${{ inputs.registries != '' }}
+        env:
+          REGISTRIES: ${{ inputs.registries }}
+        run: |
+          set -euo pipefail
+          julia --startup-file=no --project=/dev/null -e '
+            using Pkg
+            _norm(u) = replace(strip(String(u)), r"\.git$" => "")
+            for spec in split(get(ENV, "REGISTRIES", ""), "\n")
+                want = strip(spec)
+                isempty(want) && continue
+                have = Pkg.Registry.reachable_registries()
+                if occursin("://", want) || occursin("@", want)
+                    any(r -> _norm(r.repo) == _norm(want), have) && continue
+                    Pkg.Registry.add(Pkg.RegistrySpec(; url = String(want)))
+                else
+                    any(r -> r.name == want, have) && continue
+                    Pkg.Registry.add(String(want))
+                end
+            end
+            println("registries: ",
+                    join([r.name for r in Pkg.Registry.reachable_registries()], ", "))'
+
       # The flags are the point. `julia-buildpkg` precompiles with defaults; the test step runs
       # under --check-bounds=yes and --code-coverage, which is a DIFFERENT precompile
       # configuration with its own cache files. Building the default one and handing it over
@@ -258,6 +305,31 @@ jobs:
           tar -C "$HOME/.julia" -xzf compiled.tgz
           rm -f compiled.tgz
           echo "Adopted the shared compiled cache."
+
+      # The twin of the step in `prebuild` above — see the note there on why it is copied.
+      - name: Ensure the registries this project resolves from
+        if: ${{ inputs.registries != '' }}
+        env:
+          REGISTRIES: ${{ inputs.registries }}
+        run: |
+          set -euo pipefail
+          julia --startup-file=no --project=/dev/null -e '
+            using Pkg
+            _norm(u) = replace(strip(String(u)), r"\.git$" => "")
+            for spec in split(get(ENV, "REGISTRIES", ""), "\n")
+                want = strip(spec)
+                isempty(want) && continue
+                have = Pkg.Registry.reachable_registries()
+                if occursin("://", want) || occursin("@", want)
+                    any(r -> _norm(r.repo) == _norm(want), have) && continue
+                    Pkg.Registry.add(Pkg.RegistrySpec(; url = String(want)))
+                else
+                    any(r -> r.name == want, have) && continue
+                    Pkg.Registry.add(String(want))
+                end
+            end
+            println("registries: ",
+                    join([r.name for r in Pkg.Registry.reachable_registries()], ", "))'
 
       - uses: julia-actions/julia-buildpkg@v1
 
