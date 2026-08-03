@@ -59,6 +59,28 @@ jobs:
       testshards-spec: 'path="."'
     secrets: inherit
 
+  # `actions/upload-coverage` is published for consumers and, until this job, was invoked by
+  # nothing — so its first syntax error shipped and failed in a CONSUMER instead of here. It did:
+  # an example expression written in an input's `description` was evaluated at load, because a
+  # description is template text and not a comment, and the whole action failed to load with
+  # "Unrecognized named-value: 'secrets'".
+  #
+  # `dry-run` because this suite's coverage is already uploaded by the collect job; what needs
+  # exercising is that the action LOADS, finds its artifact, and runs its steps.
+  action-smoke:
+    name: The upload action loads and runs
+    needs: test
+    if: ${{ !cancelled() && needs.test.result == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      # The local `./` reference needs the repository present before the action can be read, and
+      # it tests the version this PR is changing rather than the one already on main.
+      - uses: actions/checkout@v7
+      - uses: ./actions/upload-coverage
+        with:
+          codecov-token: ${{ secrets.CODECOV_TOKEN }}
+          dry-run: true
+
   # The sharded path runs on one Julia version. Compatibility across the supported range is a
   # different question, so it is asked separately and unsharded — a version matrix times a
   # shard matrix would be 8N jobs to answer a question that does not need the split.
