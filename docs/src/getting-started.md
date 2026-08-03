@@ -132,6 +132,27 @@ Give it its own job. It checks out the repository — Codecov needs the tree to 
 file network, and an upload without one is rejected during processing, silently — and a checkout
 cleans the workspace.
 
+### Calling it twice from one workflow
+
+A matrix over Julia versions is two calls, and they share a run. Without a discriminator they
+collide on `upload-artifact`, which rejects a duplicate name — so **the second call fails on an
+upload after its tests passed**. Give each its own prefix:
+
+```yaml
+jobs:
+  ci:     { uses: ..., with: { shards: 8, artifact-prefix: 'v1' } }
+  ci-lts: { uses: ..., with: { shards: 8, artifact-prefix: 'lts', julia-version: '1.10', record-timings: false } }
+```
+
+`record-timings: false` on the secondary leg matters more than the prefix does, and fails more
+quietly. Both legs would otherwise record to the same branch having measured **different**
+configurations: whichever finishes last wins, and every later run is planned against a history
+that is half one version and half the other. Nothing fails; the balance just stops meaning what
+it says.
+
+If you set a prefix and upload coverage yourself, pass the matching artifact to the action:
+`artifact: v1-lcov`.
+
 ### Inputs
 
 Every input has a default, so `shards` is the only one most suites ever set.
@@ -152,7 +173,9 @@ Every input has a default, so `shards` is the only one most suites ever set.
 | `prebuild` | `false` | precompile once and hand it to the shards — **hosted runners only**, see [Balancing](balancing.md) |
 | `concurrency-budget` | `'0'` | how many jobs your *account* can run at once; `0` = unknown |
 | `fixed-cost-seconds` | `'0'` | per-shard overhead, for the cost figures (see [Balancing](balancing.md)) |
-| `registries` | `''` | registries to add before resolving, one per line — see below |
+| `registries` | `''` | registries to add and refresh before resolving, one per line — see below |
+| `artifact-prefix` | `'testshards'` | set it when ONE workflow calls this twice — see below |
+| `record-timings` | `true` | turn it off on the secondary legs of a multi-version matrix |
 | `testshards-spec` | `'name="TestShards"'` | where the merge jobs install TestShards from |
 
 #### `registries` — for a project that resolves from an overlay
