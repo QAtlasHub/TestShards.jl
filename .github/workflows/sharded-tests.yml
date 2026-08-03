@@ -145,6 +145,11 @@ on:
           no-opping. Registries are depot-level, so adding them here reaches inside
           `Pkg.test`'s sandbox.
 
+          Setting this ALSO refreshes every registry in every depot, which is the reason to set
+          `registries: General` even for a package that needs nothing else: on a persistent
+          self-hosted depot a registry that is present but STALE resolves fine and simply cannot
+          see a version registered since it was last pulled.
+
           Needed by a repository whose dependencies resolve from a private overlay instead of
           `[sources]`. On a self-hosted pool the depot is persistent PER BOX and the boxes do
           not all carry the same registries, so the failure without this is PARTIAL — some
@@ -260,7 +265,7 @@ jobs:
       # project, so a registry missing here fails the precompile instead of the tests. Kept as
       # two copies rather than a composite action because an action would be referenced by its
       # own ref, which is a second thing to keep current for eleven lines of script.
-      - name: Ensure the registries this project resolves from
+      - name: Ensure and refresh the registries this project resolves from
         if: ${{ inputs.registries != '' }}
         env:
           REGISTRIES: ${{ inputs.registries }}
@@ -283,6 +288,25 @@ jobs:
             end
             println("registries: ",
                     join([r.name for r in Pkg.Registry.reachable_registries()], ", "))'
+          # PRESENT is not the same as CURRENT, and a stale one fails differently: the resolve
+          # succeeds and simply cannot see a version registered since the clone was last pulled.
+          #
+          # One `Pkg.Registry.update()` is NOT enough. It manages DEPOT_PATH[1] only, and a
+          # self-hosted runner can carry the same registry twice — a per-runner front depot and a
+          # shared ~/.julia. A runner whose FRONT depot lacks the registry resolves from the
+          # shared clone, which the plain call never touches; the result is "some shards green,
+          # one red on the same commit", and waiting after a registration does not help because
+          # the staleness is per runner. Diagnosed in lab-sotashimozono/ParaLinearAlgebra#400,
+          # which cost three PRs of split results before anyone printed the depot layout.
+          #
+          # JULIA_DEPOT_PATH as a command PREFIX, never `setenv` from inside Julia — that
+          # REPLACES the environment and takes HOME with it, losing git credentials for a private
+          # registry.
+          for d in $(julia --startup-file=no -e 'print(join(DEPOT_PATH, " "))'); do
+            [ -d "$d/registries" ] || continue
+            echo "--- refreshing registries in $d"
+            JULIA_DEPOT_PATH="$d" julia --startup-file=no -e 'using Pkg; Pkg.Registry.update()' || true
+          done
 
       # The flags are the point. `julia-buildpkg` precompiles with defaults; the test step runs
       # under --check-bounds=yes and --code-coverage, which is a DIFFERENT precompile
@@ -377,7 +401,7 @@ jobs:
           echo "Adopted the shared compiled cache."
 
       # The twin of the step in `prebuild` above — see the note there on why it is copied.
-      - name: Ensure the registries this project resolves from
+      - name: Ensure and refresh the registries this project resolves from
         if: ${{ inputs.registries != '' }}
         env:
           REGISTRIES: ${{ inputs.registries }}
@@ -400,6 +424,25 @@ jobs:
             end
             println("registries: ",
                     join([r.name for r in Pkg.Registry.reachable_registries()], ", "))'
+          # PRESENT is not the same as CURRENT, and a stale one fails differently: the resolve
+          # succeeds and simply cannot see a version registered since the clone was last pulled.
+          #
+          # One `Pkg.Registry.update()` is NOT enough. It manages DEPOT_PATH[1] only, and a
+          # self-hosted runner can carry the same registry twice — a per-runner front depot and a
+          # shared ~/.julia. A runner whose FRONT depot lacks the registry resolves from the
+          # shared clone, which the plain call never touches; the result is "some shards green,
+          # one red on the same commit", and waiting after a registration does not help because
+          # the staleness is per runner. Diagnosed in lab-sotashimozono/ParaLinearAlgebra#400,
+          # which cost three PRs of split results before anyone printed the depot layout.
+          #
+          # JULIA_DEPOT_PATH as a command PREFIX, never `setenv` from inside Julia — that
+          # REPLACES the environment and takes HOME with it, losing git credentials for a private
+          # registry.
+          for d in $(julia --startup-file=no -e 'print(join(DEPOT_PATH, " "))'); do
+            [ -d "$d/registries" ] || continue
+            echo "--- refreshing registries in $d"
+            JULIA_DEPOT_PATH="$d" julia --startup-file=no -e 'using Pkg; Pkg.Registry.update()' || true
+          done
 
       - uses: julia-actions/julia-buildpkg@v1
 

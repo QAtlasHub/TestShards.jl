@@ -157,9 +157,9 @@ Every input has a default, so `shards` is the only one most suites ever set.
 
 #### `registries` — for a project that resolves from an overlay
 
-Only needed when your dependencies do not all come from General. Each line is either a name Pkg
-knows or a clone URL, and each is added **only if it is not already reachable**, because
-re-adding an existing registry errors rather than doing nothing:
+Each line is either a name Pkg knows or a clone URL. Each is added **only if it is not already
+reachable** — re-adding an existing registry errors rather than doing nothing — and then **every
+registry in every depot is refreshed**:
 
 ```yaml
     with:
@@ -169,6 +169,19 @@ re-adding an existing registry errors rather than doing nothing:
 ```
 
 Registries are depot-level, so this reaches inside `Pkg.test`'s sandbox.
+
+Set it even for a package that resolves entirely from General, if you run on a persistent
+self-hosted depot. **Present is not the same as current**, and the two fail differently: a
+missing registry stops the resolve, while a stale one resolves fine and simply cannot see a
+version registered since it was last pulled.
+
+!!! warning "One `Pkg.Registry.update()` is not enough"
+    It manages `DEPOT_PATH[1]` only, and a self-hosted runner can carry the same registry twice —
+    a per-runner front depot and a shared `~/.julia`. A runner whose *front* depot lacks the
+    registry resolves from the shared clone, which the plain call never touches. The result is
+    "some shards green, one red on the same commit", and waiting after a registration does not
+    help, because the staleness is per runner. This workflow therefore refreshes each depot in
+    turn.
 
 !!! warning "On a self-hosted pool, a missing registry fails *partially*"
     The depot is persistent per box, and the boxes need not carry the same registries. Whichever
