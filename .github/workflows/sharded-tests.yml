@@ -60,6 +60,19 @@ on:
       coverage:
         type: boolean
         default: true
+      coverage-upload:
+        description: >
+          Whether this workflow sends the merged report to Codecov. Set it false when you upload
+          it yourself with `actions/upload-coverage` — a caller in a DIFFERENT ORGANISATION has
+          to, because a secret does not survive the call into a reusable workflow across that
+          boundary (measured; a repository boundary is fine).
+
+          Without this input such a caller gets a warning about a missing token on every single
+          run, for a token it deliberately did not send — which is how a warning stops being
+          read. The merge still happens and `testshards-lcov` is still published either way;
+          only the sending is yours.
+        type: boolean
+        default: true
       diagnose:
         description: 'Report what the timing history says about the shape of the suite.'
         type: boolean
@@ -498,7 +511,7 @@ jobs:
       # secret holds, and this warning would fire on every run that has a perfectly good token.
       - name: Say so if there is no Codecov token
         id: token
-        if: ${{ inputs.coverage }}
+        if: ${{ inputs.coverage && inputs.coverage-upload }}
         env:
           TOKEN: ${{ secrets.CODECOV_TOKEN }}
         run: |
@@ -520,7 +533,7 @@ jobs:
       # step-level `if:`, where it would evaluate to the empty string whatever the secret holds —
       # which would skip the upload on every run that has a perfectly good token.
       - uses: codecov/codecov-action@v7
-        if: ${{ inputs.coverage && steps.token.outputs.have == 'true' }}
+        if: ${{ inputs.coverage && inputs.coverage-upload && steps.token.outputs.have == 'true' }}
         continue-on-error: true          # a flaky upload must not redden a green suite
         with:
           files: lcov.info
