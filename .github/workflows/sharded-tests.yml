@@ -19,10 +19,15 @@ name: Sharded tests
 #                               secrets:
 #                                 CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 #
-# THERE IS NO PLANNING JOB. Each shard decides what it owns from the same timing history,
-# using the same deterministic assignment, so the matrix carries labels only — no Julia runs
-# before the tests, and nothing has to know what the suite contains in order to split it.
+# THERE IS NO PLANNING JOB. Each shard decides what it owns from the same timing history, using
+# the same deterministic assignment, so nothing before the tests has to know what the suite
+# contains in order to split it — no Julia runs first, and the matrix carries labels only.
 #
+#   labels    the shard labels, and the ONE read of the timing history, handed on as an
+#             artifact. It reads rather than plans: it never learns what the suite contains.
+#             Reading it once is load-bearing — "same history" is what makes the shards'
+#             independent assignments agree, and a per-shard fetch let one transient failure
+#             put a single shard on a different one. See the comment on the step.
 #   test      one job per shard; each writes its own records (JSONL) and timings (TSV).
 #   collect   merge every shard's coverage into ONE Codecov upload, and every shard's records
 #             into one ordered document. This is the part otherwise hand-written per repo.
@@ -183,6 +188,58 @@ jobs:
           echo "matrix=[$m]" >> "$GITHUB_OUTPUT"
           echo "Shards: [$m]"
 
+      # The timing history is read ONCE, here, and handed to the shards as an artifact.
+      #
+      # It used to be fetched per shard, and that is not a detail. Every shard computes the same
+      # total assignment function and skips what is not its own; exactly-once rests entirely on
+      # every shard feeding that function the SAME history. A shard that falls back to
+      # round-robin while the others use the history computes a DIFFERENT function, so some
+      # units are claimed twice and others by nobody — at once, with every shard still green.
+      #
+      # Measured on this repository: seven shards printed `Loaded 23 timing rows`, the eighth
+      # printed `No ci-timings branch yet` after a transient `git ls-remote` failure the old code
+      # could not tell from an absent branch. Two units ran twice, two ran nowhere, and only the
+      # completeness gate noticed.
+      #
+      # Reading it once removes the disagreement instead of detecting it, and closes a second
+      # hole with it: `ci-timings` is force-pushed by the recording job, so shards starting
+      # either side of a push to the default branch could read different histories even with
+      # every fetch succeeding.
+      - uses: actions/checkout@v7
+
+      - name: Read the timing history, once, for every shard
+        run: |
+          set -uo pipefail
+          # `ls-remote --exit-code` distinguishes the cases and the old code discarded that with
+          # a `2>&1`. Measured: 0 = branch exists, 2 = no matching ref, anything else = error.
+          out=$(git ls-remote --exit-code --heads origin ci-timings 2>&1); rc=$?
+          if [ "$rc" -eq 0 ]; then
+            if ! git fetch --depth=1 origin ci-timings; then
+              echo "::error::The ci-timings branch exists but could not be fetched. Failing here, before any shard starts, rather than letting the shards disagree about the split."
+              exit 1
+            fi
+            if git show FETCH_HEAD:timings.tsv > timings.tsv 2>/dev/null; then
+              echo "$(wc -l < timings.tsv) timing rows."
+            else
+              echo "ci-timings carries no timings.tsv yet — round-robin."
+              : > timings.tsv
+            fi
+          elif [ "$rc" -eq 2 ]; then
+            echo "No ci-timings branch yet — round-robin until the first push to the default branch."
+            : > timings.tsv
+          else
+            echo "::error::Could not tell whether the ci-timings branch exists (git ls-remote exit $rc). Failing rather than guessing: guessing wrong puts the shards on different assignments, which double-runs some units and skips others while every shard stays green."
+            echo "$out"
+            exit 1
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: testshards-timings
+          path: timings.tsv
+          retention-days: 1
+          if-no-files-found: error
+
   # Precompile the package once, with the configuration the TEST step will use — that is the
   # part the depot cache cannot carry between runs, because the package under test changes with
   # every commit while its dependencies do not.
@@ -281,18 +338,17 @@ jobs:
 
       - uses: actions/checkout@v7
 
-      - name: Fetch the timing history (best-effort)
-        run: |
-          set -euo pipefail
-          if git ls-remote --exit-code --heads origin ci-timings >/dev/null 2>&1; then
-            git fetch --depth=1 origin ci-timings
-            git show FETCH_HEAD:timings.tsv > "${{ inputs.test-root }}/.timings.tsv" 2>/dev/null \
-              && echo "Loaded $(wc -l < "${{ inputs.test-root }}/.timings.tsv") timing rows." \
-              || { echo "ci-timings has no timings.tsv — round-robin."; : > "${{ inputs.test-root }}/.timings.tsv"; }
-          else
-            echo "No ci-timings branch yet — round-robin until the first push to the default branch."
-            : > "${{ inputs.test-root }}/.timings.tsv"
-          fi
+      # The ONE history `labels` read, not one this shard fetched for itself. A per-shard fetch
+      # let a single transient failure put one shard on a different assignment function from the
+      # rest — which double-runs some units and skips others, with every shard still green. See
+      # the comment in `labels`; the reasoning lives there, next to the fetch.
+      - uses: actions/download-artifact@v8
+        with:
+          name: testshards-timings
+          path: .testshards-timings
+
+      - name: Report what this shard was given
+        run: echo "$(wc -l < .testshards-timings/timings.tsv) timing rows, identical for every shard."
 
       - uses: julia-actions/setup-julia@v3
         with:
@@ -352,7 +408,7 @@ jobs:
         env:
           TESTSHARDS_ID: ${{ matrix.sid }}
           TESTSHARDS_N: ${{ inputs.shards }}
-          TESTSHARDS_TIMINGS: ${{ github.workspace }}/${{ inputs.test-root }}/.timings.tsv
+          TESTSHARDS_TIMINGS: ${{ github.workspace }}/.testshards-timings/timings.tsv
           # `Pkg.test` sandboxes the suite, so the output directory must be pinned into the
           # workspace or the upload would look where the files never were.
           TESTSHARDS_OUT: ${{ github.workspace }}/${{ inputs.test-root }}/.ci-out
