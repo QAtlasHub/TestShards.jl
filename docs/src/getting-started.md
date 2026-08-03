@@ -51,7 +51,8 @@ jobs:
     uses: QAtlasHub/TestShards.jl/.github/workflows/sharded-tests.yml@main
     with:
       shards: 8
-    secrets: inherit
+    secrets:
+      CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 ```
 
 !!! warning "The `contents: write` grant is required"

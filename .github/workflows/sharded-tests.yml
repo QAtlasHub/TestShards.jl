@@ -16,7 +16,8 @@ name: Sharded tests
 #                             test:
 #                               uses: QAtlasHub/TestShards.jl/.github/workflows/sharded-tests.yml@main
 #                               with: { shards: 8, runner: '["self-hosted","rosina"]' }
-#                               secrets: inherit
+#                               secrets:
+#                                 CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 #
 # THERE IS NO PLANNING JOB. Each shard decides what it owns from the same timing history,
 # using the same deterministic assignment, so the matrix carries labels only — no Julia runs
@@ -470,6 +471,39 @@ jobs:
                 println(io, "| source files | ", length(fc), " |")
             end
             println("Coverage ", pct, "% (", covered, "/", total, " lines) over ", length(fc), " files.")'
+
+      # `fail_ci_if_error: false` below is deliberate — a flaky upload must not redden a green
+      # suite — but it makes a PERMANENTLY broken upload indistinguishable from a working one
+      # from outside the log: Codecov rejects a tokenless upload during processing, and the step
+      # still succeeds. So say it here, where the cause is knowable, rather than leaving someone
+      # to notice months later that coverage stopped arriving.
+      #
+      # Measured on lab-sotashimozono/ITensorAD.jl#20: a caller in ANOTHER ORGANISATION wrote
+      # `secrets: inherit`, and this workflow saw an empty CODECOV_TOKEN — the codecov step's
+      # resolved inputs carried no `token:` at all — though the token was present there as both
+      # a repo secret and an org secret. Naming the secret in the caller fixes it.
+      #
+      # Not asserted: which of caller-is-private / caller-is-another-org / free-plan secret
+      # policy is doing it. `secrets: inherit` demonstrably DOES work for this repository's own
+      # calls into QAtlasHub/.github, so "inherit never crosses repositories" is not the rule.
+      # What is established is the failure and the fix, which is what this warning needs.
+      #
+      # This repository never hit it because it dogfoods through a local `./` reference.
+      # The emptiness is tested in the shell, not in `if:`. The `secrets` context is not
+      # available to a step-level condition — it would evaluate to the empty string whatever the
+      # secret holds, and this warning would fire on every run that has a perfectly good token.
+      - name: Say so if there is no Codecov token
+        if: ${{ inputs.coverage }}
+        env:
+          TOKEN: ${{ secrets.CODECOV_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${TOKEN:-}" ]; then
+            echo "::warning::No CODECOV_TOKEN reached this workflow. The upload will be rejected during processing (\"Token required - not valid tokenless upload\") WITHOUT failing this job. If the caller wrote 'secrets: inherit', that is the cause — name the secret instead."
+            echo "**No CODECOV_TOKEN** — coverage was merged but not uploaded." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "CODECOV_TOKEN is present."
+          fi
 
       - uses: codecov/codecov-action@v7
         if: ${{ inputs.coverage }}

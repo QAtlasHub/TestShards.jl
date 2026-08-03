@@ -67,7 +67,8 @@ jobs:
     uses: QAtlasHub/TestShards.jl/.github/workflows/sharded-tests.yml@main
     with:
       shards: 8
-    secrets: inherit
+    secrets:
+      CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 ```
 
 That is the whole adoption. You do not write a shard-planning step, a coverage-merge job, or a
