@@ -76,11 +76,24 @@ The failure is quiet by construction. Codecov rejects a tokenless upload during 
 which happens after the uploader has already succeeded at queueing it, so the step goes green and
 coverage simply stops arriving.
 
+**Which case you are in is decided by the organisation, not the repository.** Measured both ways
+against the same reusable and the same named `secrets:` block: a caller in the *same* organisation
+gets the token and uploads normally; a caller in a *different* one gets nothing. A repository
+boundary is fine.
+
 Nothing is lost, because the merge has already happened: the report is published as the
 `testshards-lcov` artifact. Upload it from your own repository, where your token works, in a job
-of its own:
+of its own — and tell the workflow to stop trying, so it does not warn you every run about a
+token you deliberately did not send:
 
 ```yaml
+  test:
+    uses: QAtlasHub/TestShards.jl/.github/workflows/sharded-tests.yml@main
+    with:
+      shards: 8
+      coverage-upload: false     # this repository sends it, below
+    # no `secrets:` block — it would not arrive, and not sending it is what silences the warning
+
   coverage:
     needs: test
     runs-on: ubuntu-latest
@@ -117,6 +130,7 @@ Every input has a default, so `shards` is the only one most suites ever set.
 | `julia-version` | `'1'` | |
 | `test-root` | `'test'` | directory holding `runtests.jl` |
 | `coverage` | `true` | merge the shards' coverage and upload it once |
+| `coverage-upload` | `true` | set `false` when you upload the merged report yourself |
 | `diagnose` | `true` | report what the history says about the suite's shape |
 | `steal` | `false` | claim work instead of being assigned it — see [Guarantees](guarantees.md) |
 | `steal-min-seconds` | `'0'` | with `steal`, leave units cheaper than this statically assigned |

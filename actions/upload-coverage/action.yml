@@ -20,7 +20,12 @@ description: >
 
 inputs:
   codecov-token:
-    description: 'Your CODECOV_TOKEN. Pass `${{ secrets.CODECOV_TOKEN }}` from the caller.'
+    # Do NOT write an example expression here. A description is TEMPLATE TEXT, not a comment:
+    # GitHub evaluates any expression in it when it loads the action, and `secrets` is not a
+    # context an action has. Spelling out the intended value cost the whole action —
+    # "Unrecognized named-value: 'secrets'" at load, so every step failed before the first one
+    # ran, in the consumer rather than here. The docs are where the example belongs.
+    description: 'Your Codecov token, passed by the caller from its own secrets.'
     required: true
   artifact:
     description: 'Artifact holding the merged report. Only change this if you renamed it.'
@@ -36,6 +41,13 @@ inputs:
     description: 'Codecov flags, comma-separated. Empty for none.'
     required: false
     default: ''
+  dry-run:
+    description: >
+      Do everything except send the report. Exists so this action can be exercised by a suite
+      that already uploads its coverage another way — an action that nothing invokes is an
+      action whose next syntax error ships.
+    required: false
+    default: 'false'
 
 runs:
   using: composite
@@ -71,3 +83,4 @@ runs:
         token: ${{ inputs.codecov-token }}
         flags: ${{ inputs.flags }}
         fail_ci_if_error: ${{ inputs.fail-on-error }}
+        dry_run: ${{ inputs.dry-run }}

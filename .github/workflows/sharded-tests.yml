@@ -60,6 +60,19 @@ on:
       coverage:
         type: boolean
         default: true
+      coverage-upload:
+        description: >
+          Whether this workflow sends the merged report to Codecov. Set it false when you upload
+          it yourself with `actions/upload-coverage` — a caller in a DIFFERENT ORGANISATION has
+          to, because a secret does not survive the call into a reusable workflow across that
+          boundary (measured; a repository boundary is fine).
+
+          Without this input such a caller gets a warning about a missing token on every single
+          run, for a token it deliberately did not send — which is how a warning stops being
+          read. The merge still happens and `testshards-lcov` is still published either way;
+          only the sending is yours.
+        type: boolean
+        default: true
       diagnose:
         description: 'Report what the timing history says about the shape of the suite.'
         type: boolean
@@ -497,11 +510,13 @@ jobs:
       # available to a step-level condition — it would evaluate to the empty string whatever the
       # secret holds, and this warning would fire on every run that has a perfectly good token.
       - name: Say so if there is no Codecov token
-        if: ${{ inputs.coverage }}
+        id: token
+        if: ${{ inputs.coverage && inputs.coverage-upload }}
         env:
           TOKEN: ${{ secrets.CODECOV_TOKEN }}
         run: |
           set -euo pipefail
+          echo "have=$([ -n "${TOKEN:-}" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
           if [ -z "${TOKEN:-}" ]; then
             echo "::warning::No CODECOV_TOKEN reached this workflow, so the upload will be rejected during processing (\"Token required - not valid tokenless upload\") WITHOUT failing this job. A secret does not always survive the call into a reusable workflow, measured across an organisation boundary, and naming it instead of inheriting it does not change that. The merged report is published as the 'testshards-lcov' artifact — upload it from your own repository with QAtlasHub/TestShards.jl/actions/upload-coverage@main, where your token works."
             echo "**No CODECOV_TOKEN** — coverage was merged but not uploaded. The merged report is in the \`testshards-lcov\` artifact." >> "$GITHUB_STEP_SUMMARY"
@@ -509,8 +524,16 @@ jobs:
             echo "CODECOV_TOKEN is present."
           fi
 
+      # Skipped, not attempted-and-failed, when no token arrived. An upload that CANNOT succeed
+      # still logs a `failed:` line every run, which trains a reader to skim past exactly the
+      # line that would matter on the day a real upload breaks. The step above already said what
+      # is wrong and where the report is, once, as a warning.
+      #
+      # The condition reads a step OUTPUT rather than the secret. `secrets` is not available to a
+      # step-level `if:`, where it would evaluate to the empty string whatever the secret holds —
+      # which would skip the upload on every run that has a perfectly good token.
       - uses: codecov/codecov-action@v7
-        if: ${{ inputs.coverage }}
+        if: ${{ inputs.coverage && inputs.coverage-upload && steps.token.outputs.have == 'true' }}
         continue-on-error: true          # a flaky upload must not redden a green suite
         with:
           files: lcov.info
