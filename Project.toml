@@ -1,6 +1,6 @@
 name = "TestShards"
 uuid = "acceef1d-f5e0-4fe4-a546-818dc56ce7b2"
-version = "0.3.26"
+version = "0.3.27"
 authors = ["sota shimozono <shimozono-sota631@g.ecc.u-tokyo.ac.jp>"]
 
 [deps]

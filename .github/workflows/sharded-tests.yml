@@ -187,6 +187,27 @@ on:
           change: `url="https://github.com/QAtlasHub/TestShards.jl", rev="my-branch"`.
         type: string
         default: 'name="TestShards"'
+      force-latest-compatible-version:
+        description: >
+          Passed to `julia-actions/julia-runtest`. The action's own default is `auto`, which
+          means `true` on a CompatHelper or Dependabot pull request: every direct dependency is
+          forced to the newest version its `[compat]` admits, so the bump is tested against what
+          it now allows rather than against whatever the resolver would have picked anyway.
+
+          Default `false` here, because on a package whose dependencies constrain EACH OTHER the
+          forcing is applied to all of them at once and the result is over-constrained. It does
+          not fail as a compat finding; it fails before any test runs, in the resolver
+          (`Unsatisfiable requirements detected for ...`) or inside Pkg itself
+          (`apply_force_latest_compatible_version!` reducing over an empty collection). What
+          reaches the reader is a red CompatHelper PR that ran ZERO tests, on every such PR, for
+          reasons that have nothing to do with the bump — and a CI-gated automerge chain
+          downstream then never fires, so the same PR is reopened and stacks.
+
+          `auto` is the right setting for a package whose dependencies are mutually independent,
+          and this input is how such a repository asks for it back. Set it per repository, from
+          whether its dependency graph actually admits a simultaneous latest.
+        type: string
+        default: 'false'
     secrets:
       CODECOV_TOKEN:
         required: false
@@ -478,6 +499,8 @@ jobs:
 
       - name: Run shard ${{ matrix.sid }}
         uses: julia-actions/julia-runtest@v1
+        with:
+          force_latest_compatible_version: ${{ inputs.force-latest-compatible-version }}
         env:
           TESTSHARDS_ID: ${{ matrix.sid }}
           TESTSHARDS_N: ${{ inputs.shards }}
