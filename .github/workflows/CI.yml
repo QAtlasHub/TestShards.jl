@@ -78,6 +78,10 @@ jobs:
       record-timings: false
       coverage-upload: false
       testshards-spec: 'path="."'
+      # This repository has no submodules, so this fetches nothing. What it does exercise is the
+      # wiring: the input is accepted, reaches every checkout, and none of them break on it.
+      # That a real submodule then arrives is NOT shown here and cannot be — see #55.
+      submodules: 'true'
     secrets: inherit
 
   # `actions/upload-coverage` is published for consumers and, until this job, was invoked by
