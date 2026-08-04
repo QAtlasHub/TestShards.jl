@@ -127,6 +127,7 @@ trouble, in the very run whose reusable-workflow call did not.
 | `artifact` | `testshards-lcov` | only change it if you renamed it |
 | `fail-on-error` | `'false'` | fail the job on a failed upload |
 | `flags` | `''` | Codecov flags, comma-separated |
+| `submodules` | `'false'` | `true`/`recursive` if the covered sources live in a submodule |
 
 Give it its own job. It checks out the repository — Codecov needs the tree to build the report's
 file network, and an upload without one is rejected during processing, silently — and a checkout
@@ -164,6 +165,7 @@ Every input has a default, so `shards` is the only one most suites ever set.
 | `helper-runner` | `'"ubuntu-latest"'` | runner for the small merge jobs — keep it hosted, they need no depot |
 | `julia-version` | `'1'` | |
 | `test-root` | `'test'` | directory holding `runtests.jl` |
+| `submodules` | `'false'` | `true` or `recursive` if your project needs them — see below |
 | `coverage` | `true` | merge the shards' coverage and upload it once |
 | `coverage-upload` | `true` | set `false` when you upload the merged report yourself |
 | `diagnose` | `true` | report what the history says about the suite's shape |
@@ -191,6 +193,24 @@ number; nothing else about the call changes.
 
 This repository's own CI runs one, on every commit, next to its eight-way call — so the
 sentence above is demonstrated rather than asserted.
+
+#### `submodules` — for a project that resolves through one
+
+If your `Manifest.toml` carries a dev path into a submodule, or any part of the suite lives in
+one, set `submodules: true` — or `recursive`, exactly as you would on your own
+`actions/checkout`. It is passed to **every** checkout this workflow runs.
+
+Without it the checkout simply does not fetch what the manifest points at, and every shard dies
+with
+
+```
+Build path for MyDep does not exist: …/submodules/MyDep.jl
+```
+
+which reads like a broken manifest and is not. The manifest is fine; the tree under it is
+incomplete. If the sources your coverage report covers live in a submodule too, pass the same
+value to `actions/upload-coverage` as well — Codecov builds the file network from the
+checked-out tree.
 
 #### `registries` — for a project that resolves from an overlay
 

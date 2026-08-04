@@ -67,6 +67,21 @@ on:
         description: 'Directory holding runtests.jl, relative to the repository.'
         type: string
         default: 'test'
+      submodules:
+        description: >
+          Passed to every `actions/checkout` this workflow runs: `false`, `true`, or `recursive`.
+          A project whose manifest carries a dev path into a submodule needs this and cannot
+          adopt the workflow without it — the checkout stops fetching what the manifest points
+          at, and every shard then dies with `Build path for X does not exist`, which reads like
+          a broken manifest and is not.
+
+          Handed to EVERY checkout rather than to the jobs that look like they need it: which
+          part of a caller's repository lives in a submodule is the caller's business, and this
+          workflow does not know it. The cost of the uniform answer is a submodule fetch in two
+          small helper jobs; the cost of the clever one is a job that fails for a reason nothing
+          here can explain.
+        type: string
+        default: 'false'
       coverage:
         type: boolean
         default: true
@@ -263,6 +278,8 @@ jobs:
       # either side of a push to the default branch could read different histories even with
       # every fetch succeeding.
       - uses: actions/checkout@v7
+        with:
+          submodules: ${{ inputs.submodules }}
 
       - name: Read the timing history, once, for every shard
         run: |
@@ -314,6 +331,8 @@ jobs:
     runs-on: ${{ fromJSON(inputs.runner) }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          submodules: ${{ inputs.submodules }}
       - uses: julia-actions/setup-julia@v3
         with:
           version: ${{ inputs.julia-version }}
@@ -421,6 +440,8 @@ jobs:
         run: echo "TESTSHARDS_JOB_START=$(date +%s)" >> "$GITHUB_ENV"
 
       - uses: actions/checkout@v7
+        with:
+          submodules: ${{ inputs.submodules }}
 
       # The ONE history `labels` read, not one this shard fetched for itself. A per-shard fetch
       # let a single transient failure put one shard on a different assignment function from the
@@ -597,6 +618,8 @@ jobs:
       # It must come before the download: `actions/checkout` cleans the workspace by default
       # and would delete the artifacts.
       - uses: actions/checkout@v7
+        with:
+          submodules: ${{ inputs.submodules }}
 
       - uses: actions/download-artifact@v8
         with:
@@ -793,6 +816,8 @@ jobs:
       contents: write                   # force-pushes the ci-timings orphan branch
     steps:
       - uses: actions/checkout@v7
+        with:
+          submodules: ${{ inputs.submodules }}
       - uses: actions/download-artifact@v8
         with:
           path: parts

@@ -59,6 +59,14 @@ inputs:
       action whose next syntax error ships.
     required: false
     default: 'false'
+  submodules:
+    description: >
+      Passed to this action's checkout: `false`, `true`, or `recursive`. Set it to whatever your
+      own CI uses if any of the SOURCES the report covers live in a submodule — Codecov builds
+      the report's file network from the checked-out tree, so a file that is not there is a file
+      the report cannot place. Same input, same meaning, as the workflow's.
+    required: false
+    default: 'false'
 
 runs:
   using: composite
@@ -105,6 +113,8 @@ runs:
     # cleans it, so anything this action fetches has to come after. Give this action a job of its
     # own rather than appending it to one that has already built something there.
     - uses: actions/checkout@v7
+      with:
+        submodules: ${{ inputs.submodules }}
 
     - uses: actions/download-artifact@v8
       with:

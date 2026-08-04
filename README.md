@@ -94,7 +94,7 @@ shards: their names change when you change `shards`.
 
 ## When one block is not enough
 
-Thirty-four suites in one fleet adopted this in one day, and five kinds of suite needed more
+Thirty-four suites in one fleet adopted this in one day, and six kinds of suite needed more
 than the block above. Each of these is measured, not anticipated:
 
 | your suite | what to add | why |
@@ -103,11 +103,11 @@ than the block above. Each of these is measured, not anticipated:
 | runs on a **persistent self-hosted depot** | `registries: General` — even if that is all you use | it also *refreshes*. A registry that is present but stale resolves fine and simply cannot see a version published since it was last pulled |
 | resolves from a **private overlay registry** | `registries:` with that registry's clone URL | added only if absent, because re-adding one errors |
 | tests **more than one Julia version** | `artifact-prefix:` on each call, and `record-timings: false` on all but one | two calls share a run: without a prefix they collide on artifact names, and both would record measurements of *different* versions into one timing history |
+| resolves through a **git submodule** | `submodules: true` (or `recursive`) | without it the checkout does not fetch what your manifest dev-paths into, and every shard dies with `Build path for X does not exist` — which reads like a broken manifest and is not |
 | came from a **hand-written test manifest** | read it before deleting it | a manifest can *exclude* things — a directory run by a separate job, a file that is meant to fail. A glob cannot see a decision, and it will silently pull those back in |
 
-Two things this cannot do yet: check out **submodules**, and pass **your own environment** to the
-shards or collect **your own artifacts** from them. If your suite needs either, it cannot use this
-workflow — see [#58](https://github.com/QAtlasHub/TestShards.jl/issues/58) and
+One thing this cannot do yet: pass **your own environment** to the shards, or collect **your own
+artifacts** from them. If your suite needs either, it cannot use this workflow — see
 [#59](https://github.com/QAtlasHub/TestShards.jl/issues/59).
 
 ## What you get out of a run
