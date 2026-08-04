@@ -71,6 +71,13 @@ jobs:
       CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 ```
 
+> **`@main` or a tag.** `@main` is what this repository's own callers use, and it means your CI
+> changes when this one does, without a commit of yours saying so. To decide that yourself, pin
+> [a release](https://github.com/QAtlasHub/TestShards.jl/releases) instead — Dependabot's
+> `github-actions` ecosystem updates a pinned `uses:` line like any other action reference.
+> Reusable workflows resolve a ref exactly, so check that the release you pin has the inputs you
+> use: an input added after it fails the run at parse time, before any log exists to read.
+
 That is the whole adoption for a **public** repository. You do not write a shard-planning step, a
 coverage-merge job, or a job that records timings — the workflow is those things.
 
