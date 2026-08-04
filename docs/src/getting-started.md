@@ -159,7 +159,7 @@ Every input has a default, so `shards` is the only one most suites ever set.
 
 | input | default | |
 |---|---|---|
-| `shards` | `8` | how many jobs to split across |
+| `shards` | `8` | how many jobs to split across; `1` runs the suite whole — see below |
 | `runner` | `'"ubuntu-latest"'` | `runs-on` as JSON, e.g. `'["self-hosted","my-label"]'` |
 | `helper-runner` | `'"ubuntu-latest"'` | runner for the small merge jobs — keep it hosted, they need no depot |
 | `julia-version` | `'1'` | |
@@ -177,6 +177,20 @@ Every input has a default, so `shards` is the only one most suites ever set.
 | `artifact-prefix` | `'testshards'` | set it when ONE workflow calls this twice — see below |
 | `record-timings` | `true` | turn it off on the secondary legs of a multi-version matrix |
 | `testshards-spec` | `'name="TestShards"'` | where the merge jobs install TestShards from |
+
+#### `shards: 1` — the suite whole
+
+`shards: 1` does not mean "one of one shard". It means **run the suite whole, in one job**: no
+split, no shard id, nothing skipped. Everything that is not the split still happens — the
+exactly-once check, the merged coverage report, the diagnosis that tells you how many shards
+this suite could actually use.
+
+It is what to write when a suite has one unit, when it is too small to be worth splitting, or
+when you adopt this for the report and want the split later. Ask for the split by raising the
+number; nothing else about the call changes.
+
+This repository's own CI runs one, on every commit, next to its eight-way call — so the
+sentence above is demonstrated rather than asserted.
 
 #### `registries` — for a project that resolves from an overlay
 

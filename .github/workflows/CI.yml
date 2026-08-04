@@ -59,6 +59,27 @@ jobs:
       testshards-spec: 'path="."'
     secrets: inherit
 
+  # `shards: 1` is a configuration a reader writes on their first day — a suite with one unit,
+  # or one not worth splitting yet — and nothing here ever ran it. It was accepted by the
+  # workflow and then rejected by the package, eight lines deeper, in a message about
+  # environment variables the caller never set (#57). A claim about what an input means is
+  # worth what it costs to demonstrate: one call, one job.
+  #
+  # Same run as `test`, so the two must not collide: `artifact-prefix` keeps their uploads
+  # apart, `record-timings: false` keeps this leg out of the history it did not measure the
+  # shape of, and `coverage-upload: false` leaves the one report to send to the sharded call.
+  solo:
+    permissions:
+      contents: write
+    uses: ./.github/workflows/sharded-tests.yml
+    with:
+      shards: 1
+      artifact-prefix: solo
+      record-timings: false
+      coverage-upload: false
+      testshards-spec: 'path="."'
+    secrets: inherit
+
   # `actions/upload-coverage` is published for consumers and, until this job, was invoked by
   # nothing — so its first syntax error shipped and failed in a CONSUMER instead of here. It did:
   # an example expression written in an input's `description` was evaluated at load, because a
