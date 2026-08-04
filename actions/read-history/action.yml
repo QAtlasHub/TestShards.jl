@@ -1,0 +1,45 @@
+name: Read the TestShards timing history
+description: >
+  Read the recorded per-unit timings the shard plan is built from — once per run, for every shard —
+  and write them to `timings.tsv` in the caller's workspace. Absent history and an unreachable
+  remote are both normal states and are handled; anything else fails the step.
+
+# WHY THIS IS AN ACTION AND NOT A `run:` IN THE WORKFLOW
+#
+# A `run:` step in a REUSABLE WORKFLOW executes in the caller's checkout, so it can only invoke
+# files the CALLER has. `run: .github/scripts/read-history.sh` therefore worked in this
+# repository's own CI — where the caller is this repository — and exited 127 on every consumer,
+# taking the whole shard matrix with it (measured: ParaLinearAlgebra.jl run 30959798081,
+# `No such file or directory`, five jobs failed, eight shards never started).
+#
+# That is the SAME shape as the defect the file was extracted to prevent: a branch that cannot be
+# reached from a run of this repository ships broken and surfaces on the first adopter. Extracting
+# it to a file made the script testable and made its LOCATION untestable here.
+#
+# An action's own files are fetched with it, so `${{ github.action_path }}` resolves for every
+# caller, and the file stays a file that `read-history.test.sh` runs. Same split as
+# `actions/upload-coverage`: the workflow owns what needs jobs, an action owns what needs to run
+# from this repository's own tree.
+
+inputs:
+  remote:
+    description: Git remote to read the history branch from.
+    required: false
+    default: origin
+  branch:
+    description: Branch holding the recorded timings.
+    required: false
+    default: ci-timings
+  out:
+    description: Path to write the history to, in the caller's workspace.
+    required: false
+    default: timings.tsv
+
+runs:
+  using: composite
+  steps:
+    - name: Read the timing history, once, for every shard
+      shell: bash
+      run: >
+        "${{ github.action_path }}/read-history.sh"
+        "${{ inputs.remote }}" "${{ inputs.branch }}" "${{ inputs.out }}"

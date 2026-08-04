@@ -97,7 +97,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - run: .github/scripts/read-history.test.sh
+      - run: actions/read-history/read-history.test.sh
 
   # `actions/upload-coverage` is published for consumers and, until this job, was invoked by
   # nothing — so its first syntax error shipped and failed in a CONSUMER instead of here. It did:
