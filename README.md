@@ -1,6 +1,6 @@
 # TestShards.jl
 
-[![docs: stable](https://img.shields.io/badge/docs-stable-blue.svg)](https://codes.sota-shimozono.com/TestShards.jl/stable/)
+[![docs: stable](https://img.shields.io/badge/docs-stable-blue.svg)](https://qatlashub.github.io/TestShards.jl/stable/)
 [![codecov](https://codecov.io/gh/QAtlasHub/TestShards.jl/branch/main/graph/badge.svg)](https://app.codecov.io/gh/QAtlasHub/TestShards.jl)
 [![Julia](https://img.shields.io/badge/julia-v1.10+-9558b2.svg)](https://julialang.org)
 [![Code Style: Blue](https://img.shields.io/badge/Code%20Style-Blue-4495d1.svg)](https://github.com/invenia/BlueStyle)
@@ -71,8 +71,19 @@ jobs:
       CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 ```
 
-That is the whole adoption. You do not write a shard-planning step, a coverage-merge job, or a
-job that records timings — the workflow is those things.
+> **`@main` or a tag.** `@main` is what this repository's own callers use, and it means your CI
+> changes when this one does, without a commit of yours saying so. To decide that yourself, pin
+> [a release](https://github.com/QAtlasHub/TestShards.jl/releases) instead — Dependabot's
+> `github-actions` ecosystem updates a pinned `uses:` line like any other action reference.
+> Reusable workflows resolve a ref exactly, so check that the release you pin has the inputs you
+> use: an input added after it fails the run at parse time, before any log exists to read.
+
+That is the whole adoption for a **public** repository. You do not write a shard-planning step, a
+coverage-merge job, or a job that records timings — the workflow is those things.
+
+If yours is **private**, the secret above will not arrive and the upload will fail without
+failing the job. That is not a mistake on your part and there is a supported way round it — see
+[When one block is not enough](#when-one-block-is-not-enough).
 
 > **`contents: write` is required.** A called workflow's jobs cannot request more permission than
 > the caller granted, and the timing history is written to a `ci-timings` branch. Granting less
@@ -80,6 +91,24 @@ job that records timings — the workflow is those things.
 
 In branch protection, require the **`All shards passed`** job. Do not require the individual
 shards: their names change when you change `shards`.
+
+## When one block is not enough
+
+Thirty-four suites in one fleet adopted this in one day, and five kinds of suite needed more
+than the block above. Each of these is measured, not anticipated:
+
+| your suite | what to add | why |
+|---|---|---|
+| a **private** repository | `coverage-upload: false`, plus a job of your own running [`actions/upload-coverage`](https://qatlashub.github.io/TestShards.jl/stable/getting-started/) | a private caller's secret does not reach a workflow in another organisation, so the reusable cannot upload for you. It still merges the report and publishes it as an artifact; only the sending is yours |
+| runs on a **persistent self-hosted depot** | `registries: General` — even if that is all you use | it also *refreshes*. A registry that is present but stale resolves fine and simply cannot see a version published since it was last pulled |
+| resolves from a **private overlay registry** | `registries:` with that registry's clone URL | added only if absent, because re-adding one errors |
+| tests **more than one Julia version** | `artifact-prefix:` on each call, and `record-timings: false` on all but one | two calls share a run: without a prefix they collide on artifact names, and both would record measurements of *different* versions into one timing history |
+| came from a **hand-written test manifest** | read it before deleting it | a manifest can *exclude* things — a directory run by a separate job, a file that is meant to fail. A glob cannot see a decision, and it will silently pull those back in |
+
+Two things this cannot do yet: check out **submodules**, and pass **your own environment** to the
+shards or collect **your own artifacts** from them. If your suite needs either, it cannot use this
+workflow — see [#58](https://github.com/QAtlasHub/TestShards.jl/issues/58) and
+[#59](https://github.com/QAtlasHub/TestShards.jl/issues/59).
 
 ## What you get out of a run
 
@@ -133,7 +162,7 @@ you have and it will say so:
 ```
 
 Every input, with its default, is in
-[Getting started](https://codes.sota-shimozono.com/TestShards.jl/stable/getting-started/).
+[Getting started](https://qatlashub.github.io/TestShards.jl/stable/getting-started/).
 
 ## Running one shard locally
 
@@ -209,12 +238,12 @@ one file that no split can finish sooner than.
 
 | | |
 |---|---|
-| [Getting started](https://codes.sota-shimozono.com/TestShards.jl/stable/getting-started/) | installing, wiring CI, every workflow input, running one shard locally |
-| [Units](https://codes.sota-shimozono.com/TestShards.jl/stable/units/) | what gets split, keeping order-dependent files together |
-| [Balancing](https://codes.sota-shimozono.com/TestShards.jl/stable/balancing/) | the timing history, how many shards your suite can use |
-| [Records](https://codes.sota-shimozono.com/TestShards.jl/stable/records/) | what a run reports, and attaching evidence to a testset |
-| [Guarantees](https://codes.sota-shimozono.com/TestShards.jl/stable/guarantees/) | what cannot silently go wrong, and the one rule your suite must follow |
-| [Composing](https://codes.sota-shimozono.com/TestShards.jl/stable/composing/) | letting another tool own the testset a unit runs in |
+| [Getting started](https://qatlashub.github.io/TestShards.jl/stable/getting-started/) | installing, wiring CI, every workflow input, running one shard locally |
+| [Units](https://qatlashub.github.io/TestShards.jl/stable/units/) | what gets split, keeping order-dependent files together |
+| [Balancing](https://qatlashub.github.io/TestShards.jl/stable/balancing/) | the timing history, how many shards your suite can use |
+| [Records](https://qatlashub.github.io/TestShards.jl/stable/records/) | what a run reports, and attaching evidence to a testset |
+| [Guarantees](https://qatlashub.github.io/TestShards.jl/stable/guarantees/) | what cannot silently go wrong, and the one rule your suite must follow |
+| [Composing](https://qatlashub.github.io/TestShards.jl/stable/composing/) | letting another tool own the testset a unit runs in |
 
 ## License
 
