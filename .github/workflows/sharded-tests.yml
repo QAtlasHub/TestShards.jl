@@ -44,7 +44,12 @@ on:
   workflow_call:
     inputs:
       shards:
-        description: 'Number of shards.'
+        description: >
+          Number of shards. `1` is not "one of one shard" — it means run the suite WHOLE, in one
+          job, with nothing split and nothing skipped. Everything else still happens: the
+          exactly-once check, the merged coverage report, the diagnosis. A suite with one unit,
+          or one adopting this for the report rather than for the split, is a real thing to be,
+          and `shards: 1` is what a reader writes to say so.
         type: number
         default: 8
       runner:
@@ -234,7 +239,11 @@ jobs:
           [ "$n" -ge 1 ] || { echo "::error::shards must be >= 1 (got $n)"; exit 1; }
           m=$(seq 1 "$n" | sed 's/^/"s/; s/$/"/' | paste -sd, -)
           echo "matrix=[$m]" >> "$GITHUB_OUTPUT"
-          echo "Shards: [$m]"
+          if [ "$n" -eq 1 ]; then
+            echo "shards: 1 — the suite runs WHOLE in one job. No shard id is set, so nothing is skipped."
+          else
+            echo "Shards: [$m]"
+          fi
 
       # The timing history is read ONCE, here, and handed to the shards as an artifact.
       #
@@ -380,7 +389,7 @@ jobs:
           if-no-files-found: error
 
   test:
-    name: shard ${{ matrix.sid }}
+    name: ${{ inputs.shards > 1 && format('shard {0}', matrix.sid) || 'the whole suite, unsplit' }}
     needs: [labels, prebuild]
     # `prebuild` is skipped when the input is off, and a skipped dependency would skip this too.
     if: ${{ !cancelled() && needs.labels.result == 'success' && needs.prebuild.result != 'failure' }}
@@ -497,12 +506,20 @@ jobs:
 
       - uses: julia-actions/julia-buildpkg@v1
 
-      - name: Run shard ${{ matrix.sid }}
+      - name: ${{ inputs.shards > 1 && format('Run shard {0}', matrix.sid) || 'Run the whole suite' }}
         uses: julia-actions/julia-runtest@v1
         with:
           force_latest_compatible_version: ${{ inputs.force-latest-compatible-version }}
         env:
-          TESTSHARDS_ID: ${{ matrix.sid }}
+          # `shards: 1` asks for the suite WHOLE, so no id is handed over: with none set the
+          # package runs every unit it observes. Setting `s1` instead would hit the package's
+          # guard against a half-configured shard — a legal-looking input failing eight lines
+          # deeper, in a message about environment variables the caller never wrote (#57).
+          #
+          # Written `cond && value || ''` and not `cond && '' || value`: an empty string is
+          # FALSY in a GitHub expression, so the second form falls through to `value` and the
+          # id is set anyway. The mistake is invisible in the file and visible only in a run.
+          TESTSHARDS_ID: ${{ inputs.shards > 1 && matrix.sid || '' }}
           TESTSHARDS_N: ${{ inputs.shards }}
           TESTSHARDS_TIMINGS: ${{ github.workspace }}/.testshards-timings/timings.tsv
           # `Pkg.test` sandboxes the suite, so the output directory must be pinned into the
