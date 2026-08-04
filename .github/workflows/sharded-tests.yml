@@ -281,39 +281,14 @@ jobs:
         with:
           submodules: ${{ inputs.submodules }}
 
+      # A FILE, not a block, and the reason is testability rather than length. The branch that
+      # handles "no history yet" cannot be reached from a run of this repository — it has had a
+      # ci-timings branch since its first push — so that branch shipped broken (#54) and
+      # surfaced on the first adopter that happened to be fresh. `read-history.test.sh` puts the
+      # SAME file in that state, and in the one where the remote cannot be reached at all. See
+      # the header of the script for why a copied snippet could not have caught it.
       - name: Read the timing history, once, for every shard
-        run: |
-          set -uo pipefail
-          # `ls-remote --exit-code` distinguishes the cases: 0 = branch exists, 2 = no matching
-          # ref, anything else = error. Measured.
-          #
-          # Captured through an `if`, and that is not style. A `run:` step's shell is
-          # `bash -e {0}`, so errexit is ON from the command line and `set -uo pipefail` does not
-          # take it off — it only ADDS options. A bare `out=$(...); rc=$?` therefore kills the
-          # step the moment ls-remote exits non-zero, BEFORE `rc` is read: a repository with no
-          # ci-timings branch yet died with exit 2 and no output, which is the one case this
-          # code was written to handle. An assignment inside an `if` condition is exempt from
-          # errexit however the shell was invoked.
-          if out=$(git ls-remote --exit-code --heads origin ci-timings 2>&1); then rc=0; else rc=$?; fi
-          if [ "$rc" -eq 0 ]; then
-            if ! git fetch --depth=1 origin ci-timings; then
-              echo "::error::The ci-timings branch exists but could not be fetched. Failing here, before any shard starts, rather than letting the shards disagree about the split."
-              exit 1
-            fi
-            if git show FETCH_HEAD:timings.tsv > timings.tsv 2>/dev/null; then
-              echo "$(wc -l < timings.tsv) timing rows."
-            else
-              echo "ci-timings carries no timings.tsv yet — round-robin."
-              : > timings.tsv
-            fi
-          elif [ "$rc" -eq 2 ]; then
-            echo "No ci-timings branch yet — round-robin until the first push to the default branch."
-            : > timings.tsv
-          else
-            echo "::error::Could not tell whether the ci-timings branch exists (git ls-remote exit $rc). Failing rather than guessing: guessing wrong puts the shards on different assignments, which double-runs some units and skips others while every shard stays green."
-            echo "$out"
-            exit 1
-          fi
+        run: .github/scripts/read-history.sh
 
       - uses: actions/upload-artifact@v7
         with:

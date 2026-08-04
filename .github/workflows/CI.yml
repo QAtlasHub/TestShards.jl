@@ -84,6 +84,21 @@ jobs:
       submodules: 'true'
     secrets: inherit
 
+  # The states a consumer is in that this repository never is. Three defects in one day shared
+  # one cause — this repository is not a consumer of itself in the ways that matter — and the
+  # sharpest of them was code handling "no timing history yet" that could not be reached by
+  # having no timing history. It shipped, and every repository that has never been sharded is
+  # in exactly that state.
+  #
+  # No Julia, no checkout of anything else, no network: the states are built out of local bare
+  # repositories in seconds. See #55 for the ones still to cover.
+  consumer-states:
+    name: States a fresh consumer is in
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: .github/scripts/read-history.test.sh
+
   # `actions/upload-coverage` is published for consumers and, until this job, was invoked by
   # nothing — so its first syntax error shipped and failed in a CONSUMER instead of here. It did:
   # an example expression written in an input's `description` was evaluated at load, because a
