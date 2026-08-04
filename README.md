@@ -94,8 +94,8 @@ shards: their names change when you change `shards`.
 
 ## When one block is not enough
 
-Thirty-four suites adopted this in one day, and five kinds of suite needed more than the block
-above. Each of these is measured, not anticipated:
+Thirty-four suites in one fleet adopted this in one day, and five kinds of suite needed more
+than the block above. Each of these is measured, not anticipated:
 
 | your suite | what to add | why |
 |---|---|---|
