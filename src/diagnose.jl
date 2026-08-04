@@ -267,4 +267,3 @@ function diagnose(
         max(Int(budget), 0),
     )
 end
-

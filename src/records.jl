@@ -83,4 +83,3 @@ Exact when CI supplied the job's end (see [`ShardWindow`](@ref) and [`load_ends`
 the job.
 """
 fixed_cost(w::ShardWindow) = window(w) - w.unit_seconds
-

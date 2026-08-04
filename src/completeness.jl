@@ -140,4 +140,3 @@ function completeness_cli(args=ARGS)
     end
     return complete(c) ? 0 : 1
 end
-

@@ -342,4 +342,3 @@ function Base.show(io::IO, ::MIME"text/plain", d::Diagnosis)
     end
     return nothing
 end
-

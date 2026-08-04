@@ -147,4 +147,3 @@ function _section(ctx::ShardContext, ts::Test.DefaultTestSet)
     ev = get(ctx.evidence, ts, Dict{String,Any}())
     return Section(ts.description, _duration(ts), npass, nfail, nerror, nbroken, ev, kids)
 end
-

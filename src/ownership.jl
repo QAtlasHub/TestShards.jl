@@ -262,4 +262,3 @@ function _owns(c::Claimed, ctx::ShardContext, key::AbstractString, index::Intege
     get(ctx.timings, key, Inf) < c.min_seconds && return _owns(Assigned(), ctx, key, index)
     return _claim(c, index)
 end
-

@@ -151,4 +151,3 @@ function _write_sections(io, key, prefix, sections)
     end
     return nothing
 end
-

@@ -263,4 +263,3 @@ function merge_lcov_cli(args=ARGS)
     println("| source files | ", length(files), " |")
     return 0
 end
-
