@@ -102,6 +102,20 @@ on:
         description: 'Report what the timing history says about the shape of the suite.'
         type: boolean
         default: true
+      cache:
+        description: >
+          Cache the Julia depot between runs with `julia-actions/cache`. `true` is right for a
+          HOSTED runner, whose depot is gone at the end of the job. Set it FALSE on a pool whose
+          depot already persists: there the restore is a no-op and the SAVE is not.
+
+          Measured on one green eight-shard run (FunctionMeasures.jl 30826019824): 44–182 s of
+          post-step per shard, ≈620 s of runner time per run, against 58–268 s of actual testing —
+          a cache costing about what the tests cost, for a depot that was already on the box. And
+          when it does not merely cost, it hangs: three jobs on 2026-08-03 whose test step
+          SUCCEEDED went red or never finished in that post-step, one of them holding a runner for
+          114 minutes, which reads downstream as ordinary queueing. See #62.
+        type: boolean
+        default: true
       steal:
         description: >
           Claim work instead of being assigned it. Each shard runs whatever is still unclaimed,
@@ -320,6 +334,7 @@ jobs:
         with:
           version: ${{ inputs.julia-version }}
       - uses: julia-actions/cache@v3
+        if: ${{ inputs.cache }}
         with:
           cache-name: testshards
           include-matrix: 'false'
@@ -442,6 +457,7 @@ jobs:
         with:
           version: ${{ inputs.julia-version }}
       - uses: julia-actions/cache@v3
+        if: ${{ inputs.cache }}
         with:
           # ONE key for all shards. They instantiate the same project, so a per-shard key
           # would keep N separate depots and pay precompilation N times over — the dominant
