@@ -207,3 +207,101 @@ end
     @test TestShards._counter_shard("testshards-records") == ""
     @test TestShards._counter_shard("testshards-coverage-s12") == "s12"
 end
+
+# ── the compact counter index (issue #74) ────────────────────────────────────────────────────
+#
+# Julia's `.cov` is a 9-char counter column, a space, and a VERBATIM COPY OF THE SOURCE LINE.
+# Measured on a real 48-file shard payload: 85.7 % of the bytes are that copy, and only 14.1 %
+# of lines carry a counter at all — so an 8-shard run uploads eight copies of the source tree,
+# which is what exhausted an organisation's Actions storage quota. `collect` already checks the
+# tree out before downloading, so the text never needed to travel.
+
+@testset "#74: the index keeps only counted lines, and rebuilds the .cov exactly" begin
+    d = mktempdir()
+    src = joinpath(d, "src")
+    mkpath(src)
+    # a source with covered lines, uncovered lines, and `-` lines that carry no counter
+    text = """
+    module M
+    # a comment, which is not executable
+    f(x) = x + 1
+
+    g(y) = y * 2
+    end
+    """
+    write(joinpath(src, "M.jl"), text)
+    cov = joinpath(src, "M.jl.4242.cov")
+    counters = ["-", "-", "        7", "-", "        0", "-"]
+    open(cov, "w") do io
+        for (c, t) in zip(counters, split(text, '\n')[1:6])
+            println(io, lpad(c, 9), " ", t)
+        end
+    end
+
+    idx = TestShards.counter_index(cov)
+    # ONLY the counted lines survive — including the ZERO, which is the difference between
+    # "reached and never taken" and "not executable", and dropping it would inflate coverage.
+    @test occursin("# lines 6", idx)
+    @test occursin("3,7", idx)
+    @test occursin("5,0", idx)
+    @test !occursin("2,", idx)
+    @test length(idx) < length(read(cov, String)) ÷ 2       # measured 61.8× on the real payload
+
+    # ROUND TRIP against the checkout, which is what `collect` does
+    parts = joinpath(d, "parts", "testshards-coverage-s3", "src")
+    mkpath(parts)
+    write(joinpath(parts, "M.jl.4242.cov.idx"), idx)
+    w = only(TestShards.restore_counters(joinpath(d, "parts"), d))
+    @test w == joinpath(d, "src", "M.jl.4242-s3.cov")
+    @test read(w, String) == read(cov, String)              # byte for byte
+end
+
+@testset "#74: a checkout that cannot support the index REFUSES, loudly" begin
+    d = mktempdir()
+    mkpath(joinpath(d, "src"))
+    write(joinpath(d, "src", "M.jl"), "a = 1\nb = 2\n")
+    parts = joinpath(d, "parts", "testshards-coverage-s1", "src")
+    mkpath(parts)
+
+    # (a) the source is not in the checkout at all
+    write(joinpath(parts, "Gone.jl.1.cov.idx"), "# lines 2\n1,3\n")
+    err = try
+        TestShards.restore_counters(joinpath(d, "parts"), d)
+        nothing
+    catch e
+        sprint(showerror, e)
+    end
+    @test err !== nothing
+    @test occursin("not in the checkout", err)
+    rm(joinpath(parts, "Gone.jl.1.cov.idx"))
+
+    # (b) the source is there but is a DIFFERENT revision. This is the one that must not pass
+    # quietly: a shifted rebuild reports fewer covered lines, which reads as a coverage drop
+    # rather than as a bug, and nothing else in the pipeline would notice.
+    write(joinpath(parts, "M.jl.1.cov.idx"), "# lines 9\n1,3\n")
+    err2 = try
+        TestShards.restore_counters(joinpath(d, "parts"), d)
+        nothing
+    catch e
+        sprint(showerror, e)
+    end
+    @test err2 !== nothing
+    @test occursin("2 lines but", err2) && occursin("written", err2)
+
+    # (c) a file that is not an index at all
+    write(joinpath(parts, "M.jl.1.cov.idx"), "1,3\n")
+    @test_throws ArgumentError TestShards.restore_counters(joinpath(d, "parts"), d)
+end
+
+@testset "#74: a raw .cov still restores by copy, so a mid-upgrade run is not broken" begin
+    # Shards that uploaded before this change and a `collect` that runs after it must still
+    # merge — the two halves of one run can straddle a workflow bump.
+    d = mktempdir()
+    parts = joinpath(d, "parts", "testshards-coverage-s1", "src")
+    mkpath(parts)
+    write(joinpath(parts, "M.jl.1.cov"), "        5 a = 1\n")
+    dest = joinpath(d, "repo")
+    w = only(TestShards.restore_counters(joinpath(d, "parts"), dest))
+    @test w == joinpath(dest, "src", "M.jl.1-s1.cov")
+    @test read(w, String) == "        5 a = 1\n"             # copied, not rebuilt
+end
