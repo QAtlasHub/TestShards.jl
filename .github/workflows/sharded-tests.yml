@@ -312,7 +312,18 @@ jobs:
       # what has to run from this repository's own tree.
       - uses: QAtlasHub/TestShards.jl/actions/read-history@main
 
+      # NON-FATAL, and this is the load-bearing one (issue #74). This job's real product is the
+      # `matrix` OUTPUT, which is already set by the time this step runs — the log of a run that
+      # failed here still reads `121 timing rows.` and `Set output 'matrix'`. Letting an upload
+      # failure fail the JOB therefore discards a matrix that was computed successfully, and
+      # every shard `needs:` it, so the entire suite is skipped.
+      #
+      # Measured: an organisation hit the Actions artifact storage quota and every consumer's CI
+      # went red HERE — `Failed to CreateArtifact: Artifact storage quota has been hit` — before
+      # a single test executed. A storage problem should cost the timing HISTORY, which is an
+      # optimisation, not the TEST RESULT, which is the point of the run.
       - uses: actions/upload-artifact@v7
+        continue-on-error: true
         with:
           name: ${{ inputs.artifact-prefix }}-timings
           path: timings.tsv
@@ -580,8 +591,12 @@ jobs:
           echo "Captured $n coverage files."
           [ "$n" -gt 0 ] || echo "::warning::no .cov files — was the suite run with coverage on?"
 
+      # NON-FATAL for the same reason (issue #74): this step runs AFTER the suite, so failing the
+      # job here converts a green shard into a red one over a report. `collect` already treats
+      # missing counters as a loud reporting failure of its own, which is where that belongs.
       - name: Upload this shard's coverage counters
         if: ${{ inputs.coverage }}
+        continue-on-error: true
         uses: actions/upload-artifact@v7
         with:
           name: ${{ inputs.artifact-prefix }}-coverage-${{ matrix.sid }}
@@ -594,6 +609,7 @@ jobs:
 
       - name: Upload this shard's records and timings
         if: always()
+        continue-on-error: true
         uses: actions/upload-artifact@v7
         with:
           name: ${{ inputs.artifact-prefix }}-out-${{ matrix.sid }}
@@ -649,8 +665,20 @@ jobs:
       # shard-suffixed; putting them back where their sources are is what lets CoverageTools
       # find them, and it globs `<file>.*.cov` so the suffix is free.
       # ONCE, here, rather than N times in the shards.
+      # NON-FATAL, but LOUD (issue #74). Coverage is a REPORT; "every unit ran exactly once",
+      # below, is a CORRECTNESS CLAIM, and only the second one should be able to fail a suite.
+      # Those are this file's own two categories and they were sharing one exit status: when the
+      # per-shard uploads were refused by a full artifact storage quota, this step found no
+      # counters, `collect` failed, and the `All shards passed` gate — which needs `collect` —
+      # reported a red suite for a run whose tests were all green.
+      #
+      # The refusal inside `restore_counters` stays exactly as loud as it was; what changes is
+      # that it annotates instead of gating. The silent-coverage-loss failure this guards
+      # (54.5 % reported for a 94.8 % suite) is still impossible: a missing report is an
+      # `::error::` in the run and an absent Codecov upload, not a quietly wrong number.
       - name: Convert every shard's counters into one report
         if: ${{ inputs.coverage }}
+        continue-on-error: true
         run: |
           set -euo pipefail
           julia --startup-file=no --project="$RUNNER_TEMP/tsenv" -e '
@@ -726,6 +754,7 @@ jobs:
       # lose nothing.
       - name: Publish the merged report
         if: ${{ inputs.coverage }}
+        continue-on-error: true
         uses: actions/upload-artifact@v7
         with:
           name: ${{ inputs.artifact-prefix }}-lcov
@@ -775,6 +804,7 @@ jobs:
           echo "Merged $(wc -l < records.jsonl) unit records."
 
       - name: Upload the merged records
+        continue-on-error: true
         uses: actions/upload-artifact@v7
         with:
           name: ${{ inputs.artifact-prefix }}-records
