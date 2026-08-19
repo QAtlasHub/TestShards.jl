@@ -327,7 +327,11 @@ jobs:
       # went red HERE — `Failed to CreateArtifact: Artifact storage quota has been hit` — before
       # a single test executed. A storage problem should cost the timing HISTORY, which is an
       # optimisation, not the TEST RESULT, which is the point of the run.
+      # GATED ON `record-timings`, which already gates the `timings` JOB that consumes this
+      # history. Producing an artifact no one is allowed to consume is work with no reader, and
+      # on an account at its artifact quota it is a failed API call on every run.
       - id: timings
+        if: ${{ inputs.record-timings }}
         uses: actions/upload-artifact@v7
         continue-on-error: true
         with:
@@ -639,8 +643,12 @@ jobs:
           # 12 counters and uploaded none. The records upload below already knew this.
           include-hidden-files: true
 
+      # `always()` is load-bearing and stays: a FAILED shard is exactly when its records are worth
+      # having. `diagnose` is added beside it because that input already gates every step that
+      # READS these records (lines 681/685/851) — without it here, the artifact is produced for a
+      # consumer that has been switched off.
       - name: Upload this shard's records and timings
-        if: always()
+        if: ${{ always() && inputs.diagnose }}
         continue-on-error: true
         uses: actions/upload-artifact@v7
         with:
@@ -835,7 +843,10 @@ jobs:
           MERGE
           echo "Merged $(wc -l < records.jsonl) unit records."
 
+      # Same as the per-shard records above: `diagnose` gates the step that builds this file
+      # (line 851), so it should gate the upload that publishes it.
       - name: Upload the merged records
+        if: ${{ inputs.diagnose }}
         continue-on-error: true
         uses: actions/upload-artifact@v7
         with:
