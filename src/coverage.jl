@@ -37,6 +37,89 @@ function line_totals(fs::AbstractVector{LcovFile})
 end
 
 """
+    counter_index(cov) -> String
+
+The COUNTED LINES of a Julia `.cov` file, as `"<line>,<hits>"` — one per line, with a
+`# lines <n>` header naming the source's line count.
+
+Julia writes `Foo.jl.<pid>.cov` as a 9-character counter column, one space, and then **a
+verbatim copy of the source line**. Measured on one 48-file shard payload of
+`ParaLinearAlgebra.jl` (issue #74): 965,565 bytes, of which **815,592 (85.7 %) is that source
+text**, and only 2,134 of 15,181 lines carry a counter at all — the rest are `-`. Since every
+shard emits counters for the WHOLE tree rather than the files it touched, an 8-shard run ships
+eight near-identical copies of the package's source through artifact storage. That exhausted an
+organisation's Actions storage quota, which fails the run at `Shard labels`, before any test.
+
+The index drops both redundancies. Same payload: **15,049 bytes, 64.2× smaller**.
+
+Nothing is lost, because the text is already at the destination: `collect` runs
+`actions/checkout` BEFORE `download-artifact` (it must — Codecov builds the file network from
+the tree), so [`restore_counters`](@ref) rebuilds each `.cov` from the checkout. Verified on
+that artifact: the embedded text is byte-identical to the repo file at the run's `head_sha` for
+48 of 48 files, and the round trip reproduces the original `.cov` byte for byte for 48 of 48.
+"""
+function counter_index(cov::AbstractString)
+    io = IOBuffer()
+    n = 0
+    for line in eachline(cov)
+        n += 1
+        h = strip(SubString(line, 1, min(9, lastindex(line))))
+        (isempty(h) || h == "-") && continue
+        println(io, n, ",", h)
+    end
+    return string("# lines ", n, "\n", String(take!(io)))
+end
+
+# Rebuild `Foo.jl.<pid>.cov` from an index and the source that is already checked out. The
+# format is Julia's: `%9s` of the counter (or `-`), a space, then the source line verbatim.
+#
+# THE MISMATCH CHECK IS NOT DEFENSIVE, IT IS THE FAILURE MODE THIS INTRODUCES. A short or
+# shifted `.cov` does not look broken to CoverageTools — it reports FEWER covered lines, which
+# reads as a coverage drop rather than as a bug, and nothing announces it. That is the same
+# shape as the silent 54.5%-for-94.8% this file's other docstring records, so it refuses by
+# name instead: the index carries the line count the shard saw, and a source that disagrees
+# with it, or is absent from the checkout, stops the merge.
+function _restore_from_index(idx::AbstractString, src::AbstractString, out::AbstractString)
+    lines = readlines(idx)
+    hdr = findfirst(startswith("# lines "), lines)
+    hdr === nothing && throw(
+        ArgumentError(
+            "restore_counters: $(idx) has no `# lines <n>` header; it is not a counter index",
+        ),
+    )
+    want = parse(Int, strip(SubString(lines[hdr], length("# lines ") + 1)))
+    isfile(src) || throw(
+        ArgumentError(
+            "restore_counters: $(idx) indexes $(src), which is not in the checkout. The " *
+            "counters are rebuilt against the working tree, so `collect` must check out the " *
+            "SAME revision the shards ran. Rebuilding without it would silently under-report.",
+        ),
+    )
+    text = readlines(src)
+    length(text) == want || throw(
+        ArgumentError(
+            "restore_counters: $(src) has $(length(text)) lines but $(idx) was written " *
+            "against $(want). The checkout is not the revision the shard ran; a `.cov` built " *
+            "from it would shift every counter and read as a coverage drop, not as an error.",
+        ),
+    )
+    hits = Dict{Int,String}()
+    for l in lines[(hdr + 1):end]
+        isempty(strip(l)) && continue
+        c = findfirst(==(','), l)
+        c === nothing && continue
+        hits[parse(Int, SubString(l, 1, c - 1))] = String(SubString(l, c + 1, lastindex(l)))
+    end
+    mkpath(dirname(out))
+    open(out, "w") do io
+        for (i, t) in enumerate(text)
+            println(io, lpad(get(hits, i, "-"), 9), " ", t)
+        end
+    end
+    return out
+end
+
+"""
     restore_counters(parts, dest = ".") -> Vector{String}
 
 Put every shard's raw coverage counters back where their sources are, tagged so they cannot
@@ -64,11 +147,21 @@ function restore_counters(parts::AbstractString, dest::AbstractString=".")
         isempty(shard) && continue
         for (root, _, files) in walkdir(entry)
             for f in files
-                endswith(f, ".cov") || continue
+                # `.cov.idx` is the compact form (issue #74); a real `.cov` still restores by
+                # copy, so a run whose shards uploaded before this change and whose `collect`
+                # runs after it is not a broken run.
+                isidx = endswith(f, ".cov.idx")
+                (isidx || endswith(f, ".cov")) || continue
                 rel = relpath(joinpath(root, f), entry)
-                out = joinpath(dest, _tag_counter(rel, shard))
-                mkpath(dirname(out))
-                cp(joinpath(root, f), out; force=true)
+                out = joinpath(dest, _tag_counter(isidx ? chop(rel; tail=4) : rel, shard))
+                if isidx
+                    _restore_from_index(
+                        joinpath(root, f), joinpath(dest, _index_source(rel)), out
+                    )
+                else
+                    mkpath(dirname(out))
+                    cp(joinpath(root, f), out; force=true)
+                end
                 push!(written, out)
             end
         end
@@ -81,6 +174,13 @@ function _counter_shard(dir::AbstractString)
     i = findlast("coverage-", dir)
     i === nothing && return ""
     return String(dir[(last(i) + 1):end])
+end
+
+"`src/Foo.jl.123.cov.idx` → `src/Foo.jl`: the source the index was written against."
+function _index_source(rel::AbstractString)
+    base = chop(rel; tail=length(".cov.idx"))
+    i = findlast(==('.'), base)          # strip the `.<pid>` Julia appends
+    return i === nothing ? base : String(SubString(base, 1, i - 1))
 end
 
 "`src/Foo.jl.123.cov` → `src/Foo.jl.123-s3.cov`, which `Foo.jl.*.cov` still matches."
