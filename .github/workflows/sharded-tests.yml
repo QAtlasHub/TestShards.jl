@@ -260,6 +260,11 @@ jobs:
     runs-on: ${{ fromJSON(inputs.helper-runner) }}
     outputs:
       matrix: ${{ steps.gen.outputs.matrix }}
+      # WHETHER THE HISTORY EXISTS, DECIDED ONCE (issue #74). The shards must all use the SAME
+      # assignment function; a per-shard decision about the history is exactly the divergence the
+      # comment on the download below forbids. So the answer is computed here, in the one job that
+      # knows, and every shard reads it.
+      timings: ${{ steps.timings.outcome }}
     steps:
       - id: gen
         run: |
@@ -322,7 +327,8 @@ jobs:
       # went red HERE — `Failed to CreateArtifact: Artifact storage quota has been hit` — before
       # a single test executed. A storage problem should cost the timing HISTORY, which is an
       # optimisation, not the TEST RESULT, which is the point of the run.
-      - uses: actions/upload-artifact@v7
+      - id: timings
+        uses: actions/upload-artifact@v7
         continue-on-error: true
         with:
           name: ${{ inputs.artifact-prefix }}-timings
@@ -336,6 +342,11 @@ jobs:
   prebuild:
     name: Precompile once
     if: ${{ inputs.prebuild }}
+    outputs:
+      # SAME SHAPE AS `labels.timings` (issue #74). The shared compiled cache is an OPTIMISATION —
+      # a shard without it precompiles for itself and computes the same answer — so a storage
+      # failure here must cost time, not the run. Decided once so the matrix cannot split.
+      cache: ${{ steps.prebuilt.outcome }}
     runs-on: ${{ fromJSON(inputs.runner) }}
     steps:
       - uses: actions/checkout@v7
@@ -409,7 +420,9 @@ jobs:
           tar -C "$HOME/.julia" -czf compiled.tgz compiled
           echo "Compiled cache: $(du -h compiled.tgz | cut -f1)"
 
-      - uses: actions/upload-artifact@v7
+      - id: prebuilt
+        uses: actions/upload-artifact@v7
+        continue-on-error: true
         with:
           name: ${{ inputs.artifact-prefix }}-prebuild
           path: compiled.tgz
@@ -456,13 +469,28 @@ jobs:
       # let a single transient failure put one shard on a different assignment function from the
       # rest — which double-runs some units and skips others, with every shard still green. See
       # the comment in `labels`; the reasoning lives there, next to the fetch.
+      # GATED ON THE LABEL JOB'S ANSWER, not on this shard's luck (issue #74). Making the
+      # download itself `continue-on-error` would reintroduce precisely the divergence the comment
+      # above forbids: one shard with history and the rest without are on DIFFERENT assignment
+      # functions, which double-runs some units and skips others with every shard still green.
+      #
+      # `needs.labels.outputs.timings` is one value for the whole matrix, so either every shard
+      # has the history or none does. "None" is a state the package already defines — `load_timings`
+      # returns an empty table for a missing path, which is what the first run of any suite gets —
+      # so the fallback is the ordinary no-history assignment rather than a new code path.
       - uses: actions/download-artifact@v8
+        if: ${{ needs.labels.outputs.timings == 'success' }}
         with:
           name: ${{ inputs.artifact-prefix }}-timings
           path: .testshards-timings
 
       - name: Report what this shard was given
-        run: echo "$(wc -l < .testshards-timings/timings.tsv) timing rows, identical for every shard."
+        run: |
+          if [ -f .testshards-timings/timings.tsv ]; then
+            echo "$(wc -l < .testshards-timings/timings.tsv) timing rows, identical for every shard."
+          else
+            echo "::warning::no timing history this run (the label job could not publish it) — every shard is using the same unweighted assignment, which is correct but may balance worse."
+          fi
 
       - uses: julia-actions/setup-julia@v3
         with:
@@ -479,17 +507,21 @@ jobs:
           include-matrix: 'false'
       # Before buildpkg, so that what it finds already precompiled it does not redo.
       - uses: actions/download-artifact@v8
-        if: ${{ inputs.prebuild }}
+        if: ${{ inputs.prebuild && needs.prebuild.outputs.cache == 'success' }}
         with:
           name: ${{ inputs.artifact-prefix }}-prebuild
       - name: Adopt the precompiled cache
-        if: ${{ inputs.prebuild }}
+        if: ${{ inputs.prebuild && needs.prebuild.outputs.cache == 'success' }}
         run: |
           set -euo pipefail
           mkdir -p "$HOME/.julia"
           tar -C "$HOME/.julia" -xzf compiled.tgz
           rm -f compiled.tgz
           echo "Adopted the shared compiled cache."
+
+      - name: No shared compiled cache this run
+        if: ${{ inputs.prebuild && needs.prebuild.outputs.cache != 'success' }}
+        run: echo "::warning::the shared compiled cache could not be published, so this shard precompiles for itself — slower, same result."
 
       # The twin of the step in `prebuild` above — see the note there on why it is copied.
       - name: Ensure and refresh the registries this project resolves from
