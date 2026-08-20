@@ -79,6 +79,7 @@ include("ownership.jl")     # which units are this shard's, by assignment or by 
 include("provider.jl")      # the testset a unit runs in, and how a tool supplies its own
 include("run.jl")           # running a unit, the evidence it leaves, and @shard / @unit
 include("json.jl")          # minimal JSON writer — this package installs cold, with no deps
+include("evidence.jl")     # moving a shard's evidence to the collector without storage
 include("completeness.jl")  # did the run cover the suite, or only look like it did
 include("coverage.jl")      # one LCOV report out of N shards
 include("diagnose.jl")      # read the history back: Observation, Diagnosis

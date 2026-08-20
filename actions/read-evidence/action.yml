@@ -1,0 +1,49 @@
+name: Read TestShards evidence from the shards' job logs
+description: >
+  Download each shard job's log for one attempt of one run, so the collector can recover the
+  completeness evidence the shards printed. Uses no artifact storage and no cache; needs only
+  `actions: read`.
+
+# WHY THIS IS AN ACTION AND NOT A `run:` IN THE WORKFLOW — the same reason as
+# `actions/read-history`. A `run:` step in a REUSABLE workflow executes in the CALLER's checkout,
+# so it can only invoke files the caller has; a script referenced by path works in this
+# repository's own CI and exits 127 on every consumer. An action's files are fetched with it.
+
+inputs:
+  repository:
+    description: owner/name of the repository whose run is being read.
+    required: false
+    default: ${{ github.repository }}
+  run-id:
+    required: false
+    default: ${{ github.run_id }}
+  attempt:
+    description: >
+      Run attempt. Reading `/runs/{id}/jobs` instead of this attempt's jobs merges every attempt,
+      so a re-run's shards double-count while the recovery looks clean.
+    required: false
+    default: ${{ github.run_attempt }}
+  job-prefix:
+    description: Only jobs whose name starts with this are read.
+    required: false
+    default: ''
+  path:
+    description: Directory to write the logs into.
+    required: false
+    default: shard-logs
+  token:
+    description: >
+      Needs `actions: read`. A fork pull request has it, and it needs no write scope at all.
+    required: false
+    default: ${{ github.token }}
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+      run: >
+        bash "${{ github.action_path }}/read-evidence.sh"
+        "${{ inputs.repository }}" "${{ inputs.run-id }}" "${{ inputs.attempt }}"
+        "${{ inputs.path }}" "${{ inputs.job-prefix }}"
