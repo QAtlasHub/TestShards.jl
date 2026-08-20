@@ -121,6 +121,27 @@ jobs:
           codecov-token: ${{ secrets.CODECOV_TOKEN }}
           dry-run: true
 
+  # The state this action exists to survive, and the one its own CI never reaches on its own: the
+  # merged report is NOT there. Every consumer is in it right now — an Actions storage quota is
+  # enforced at `CreateArtifact` before any bytes are sent, so nothing gets created — and this
+  # repository is public, so its storage is free and it can never reproduce that by accident.
+  #
+  # Naming an artifact that cannot exist reproduces it exactly. What is under test is not the
+  # message: it is that `continue-on-error` on a step of a COMPOSITE action is honoured at all, and
+  # that `steps.<id>.outcome` is readable from a later step of the same composite. If either is not
+  # true the action dies at the download exactly as before, and this job is the only thing that
+  # would say so.
+  action-absent-artifact:
+    name: The upload action survives a missing report
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./actions/upload-coverage
+        with:
+          codecov-token: ${{ secrets.CODECOV_TOKEN }}
+          artifact: testshards-lcov-deliberately-absent
+          dry-run: true
+
   # The sharded path runs on one Julia version. Compatibility across the supported range is a
   # different question, so it is asked separately and unsharded — a version matrix times a
   # shard matrix would be 8N jobs to answer a question that does not need the split.

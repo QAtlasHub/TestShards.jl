@@ -134,13 +134,27 @@ runs:
       with:
         name: ${{ inputs.artifact }}
 
+    # THE TRADE THIS MAKES, SAID OUT LOUD. `outcome != 'success'` is every reason the download can
+    # fail, not only absence — a network fault and a genuinely lost `-lcov` land here too. So a
+    # real regression in the producer degrades to a warning where it used to be red. That is
+    # accepted because the alternative is worse (a storage condition taking down every consumer's
+    # test result) and because the step summary carries it where a warning alone would be missed.
+    # What is NOT accepted is claiming a cause this step has not established: it says the download
+    # failed and lists what usually does that, rather than asserting the artifact does not exist.
     - shell: bash
       run: |
         set -euo pipefail
         if [ "${{ steps.fetch.outcome }}" != "success" ]; then
-          echo "::warning::${{ inputs.artifact }} does not exist, so there is no merged report to send. Coverage is not reported for this run; the tests themselves are unaffected. The usual cause is that the run could not create artifacts at all — an Actions storage quota is enforced at CreateArtifact, before any bytes are sent, so it stops a 0-byte artifact exactly as it stops a large one."
-          echo "### Coverage" >> "$GITHUB_STEP_SUMMARY"
-          echo "Not reported: \`${{ inputs.artifact }}\` was not produced by the run." >> "$GITHUB_STEP_SUMMARY"
+          echo "::warning::could not download ${{ inputs.artifact }}, so there is no merged report to send. Coverage is not reported for this run; the tests themselves are unaffected. The usual cause is that the run could not create artifacts at all — an Actions storage quota is enforced at CreateArtifact, before any bytes are sent, so it stops a 0-byte artifact exactly as it stops a large one. A lost upload or a transient fault reach this branch too, so check whether the run produced any artifacts at all before assuming the quota."
+          # `${GITHUB_STEP_SUMMARY:-}` because this runs under `set -u`, and an unbound variable
+          # here would kill the step in the middle of degrading gracefully — turning the fallback
+          # into a second, more confusing failure.
+          if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+            {
+              echo "### Coverage"
+              echo "Not reported: \`${{ inputs.artifact }}\` could not be downloaded."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
           exit 0
         fi
         # PRESENT BUT EMPTY is a different thing entirely: something produced the artifact and put
