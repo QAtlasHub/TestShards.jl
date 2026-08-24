@@ -650,6 +650,38 @@ jobs:
           if-no-files-found: ignore
           include-hidden-files: true
 
+      # A SECOND ROAD FOR THE SAME EVIDENCE, and only for the evidence (#74).
+      #
+      # `Every unit ran, exactly once` is a CORRECTNESS claim — this file's own comment says only
+      # such a claim may fail a suite — and it is the one thing here that cannot simply be skipped
+      # when its input is missing. A full artifact storage quota takes the artifact road out and
+      # the gate with it, which is how a fleet of green suites went red for six days.
+      #
+      # Cache is the transport that clears every constraint this workflow has: no permission the
+      # callers do not already grant (a reusable workflow may not request more than its caller
+      # gave, and asking makes every consumer fail to START), no new action in this repo (a new
+      # action and its first reference cannot land together — #84), and a quota of its own.
+      # Measured: ~373 B per file, three files, ~1.1 kB a shard.
+      #
+      # THE KEY MUST NAME THE CALLER, not just the run. This workflow is reusable and a single run
+      # can invoke it more than once — this repo's own CI does, `ci` with 8 shards and `solo` with
+      # 1 — so a key of `run_id + sid` alone makes the second caller's collector restore the FIRST
+      # caller's shard. Measured: `solo`'s gate reported "3 unit(s) ran twice: 1 on local and s1",
+      # because its own evidence is labelled `local` while what it picked up was `ci`'s `s1`.
+      # `artifact-prefix` is the discriminator this workflow already uses for exactly this.
+      #
+      # THE PATH MUST MATCH THE RESTORE'S EXACTLY. A cache entry is identified by its key AND by a
+      # version derived from the `path` inputs, so saving one path and restoring into another is a
+      # miss on an identical key — "Cache saved with key: X" and "Cache not found for input keys: X"
+      # in the same run. The collector restores to this same path and moves the files afterwards.
+      - name: Cache this shard's evidence — the road that survives a full artifact quota
+        if: always()
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ inputs.test-root }}/.ci-out
+          key: testshards-evidence-${{ inputs.artifact-prefix }}-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.sid }}
+
   collect:
     name: Collect coverage and records
     needs: test
@@ -799,12 +831,278 @@ jobs:
       # checking a theorem each run costs nothing while turning it from an argument into
       # evidence. Under claiming it is the only thing standing between a runner dying mid-claim
       # and a green run that quietly skipped part of the suite.
+      # THE SECOND ROAD, restored here. It feeds ONLY the completeness gate below: the records
+      # merge keeps reading `parts` alone, because two roads delivering the same `records-*.jsonl`
+      # would double every record, while the gate's three lists are `sort -u`'d and therefore
+      # idempotent under duplication.
+      #
+      # A LADDER rather than a loop, because `uses:` cannot be looped and the shard count is an
+      # input. Sixteen covers twice the default; a run with more shards keeps the artifact road,
+      # which is the behaviour it has today.
+      - uses: actions/cache/restore@v4
+        id: ev1
+        if: ${{ inputs.shards >= 1 }}
+        continue-on-error: true
+        with:
+          path: ${{ inputs.test-root }}/.ci-out
+          key: testshards-evidence-${{ inputs.artifact-prefix }}-${{ github.run_id }}-${{ github.run_attempt }}-s1
+          fail-on-cache-miss: false
+      - name: stash s1
+        if: ${{ inputs.shards >= 1 }}
+        continue-on-error: true
+        run: |
+          d="${{ inputs.test-root }}/.ci-out"
+          mkdir -p cache-parts/s1
+          [ -d "$d" ] && { mv "$d"/* cache-parts/s1/ 2>/dev/null || true; rm -rf "$d"; }
+          echo "s1: hit='${{ steps.ev1.outputs.cache-hit }}' files=$(ls cache-parts/s1 2>/dev/null | wc -l)"
+      - uses: actions/cache/restore@v4
+        id: ev2
+        if: ${{ inputs.shards >= 2 }}
+        continue-on-error: true
+        with:
+          path: ${{ inputs.test-root }}/.ci-out
+          key: testshards-evidence-${{ inputs.artifact-prefix }}-${{ github.run_id }}-${{ github.run_attempt }}-s2
+          fail-on-cache-miss: false
+      - name: stash s2
+        if: ${{ inputs.shards >= 2 }}
+        continue-on-error: true
+        run: |
+          d="${{ inputs.test-root }}/.ci-out"
+          mkdir -p cache-parts/s2
+          [ -d "$d" ] && { mv "$d"/* cache-parts/s2/ 2>/dev/null || true; rm -rf "$d"; }
+          echo "s2: hit='${{ steps.ev2.outputs.cache-hit }}' files=$(ls cache-parts/s2 2>/dev/null | wc -l)"
+      - uses: actions/cache/restore@v4
+        id: ev3
+        if: ${{ inputs.shards >= 3 }}
+        continue-on-error: true
+        with:
+          path: ${{ inputs.test-root }}/.ci-out
+          key: testshards-evidence-${{ inputs.artifact-prefix }}-${{ github.run_id }}-${{ github.run_attempt }}-s3
+          fail-on-cache-miss: false
+      - name: stash s3
+        if: ${{ inputs.shards >= 3 }}
+        continue-on-error: true
+        run: |
+          d="${{ inputs.test-root }}/.ci-out"
+          mkdir -p cache-parts/s3
+          [ -d "$d" ] && { mv "$d"/* cache-parts/s3/ 2>/dev/null || true; rm -rf "$d"; }
+          echo "s3: hit='${{ steps.ev3.outputs.cache-hit }}' files=$(ls cache-parts/s3 2>/dev/null | wc -l)"
+      - uses: actions/cache/restore@v4
+        id: ev4
+        if: ${{ inputs.shards >= 4 }}
+        continue-on-error: true
+        with:
+          path: ${{ inputs.test-root }}/.ci-out
+          key: testshards-evidence-${{ inputs.artifact-prefix }}-${{ github.run_id }}-${{ github.run_attempt }}-s4
+          fail-on-cache-miss: false
+      - name: stash s4
+        if: ${{ inputs.shards >= 4 }}
+        continue-on-error: true
+        run: |
+          d="${{ inputs.test-root }}/.ci-out"
+          mkdir -p cache-parts/s4
+          [ -d "$d" ] && { mv "$d"/* cache-parts/s4/ 2>/dev/null || true; rm -rf "$d"; }
+          echo "s4: hit='${{ steps.ev4.outputs.cache-hit }}' files=$(ls cache-parts/s4 2>/dev/null | wc -l)"
+      - uses: actions/cache/restore@v4
+        id: ev5
+        if: ${{ inputs.shards >= 5 }}
+        continue-on-error: true
+        with:
+          path: ${{ inputs.test-root }}/.ci-out
+          key: testshards-evidence-${{ inputs.artifact-prefix }}-${{ github.run_id }}-${{ github.run_attempt }}-s5
+          fail-on-cache-miss: false
+      - name: stash s5
+        if: ${{ inputs.shards >= 5 }}
+        continue-on-error: true
+        run: |
+          d="${{ inputs.test-root }}/.ci-out"
+          mkdir -p cache-parts/s5
+          [ -d "$d" ] && { mv "$d"/* cache-parts/s5/ 2>/dev/null || true; rm -rf "$d"; }
+          echo "s5: hit='${{ steps.ev5.outputs.cache-hit }}' files=$(ls cache-parts/s5 2>/dev/null | wc -l)"
+      - uses: actions/cache/restore@v4
+        id: ev6
+        if: ${{ inputs.shards >= 6 }}
+        continue-on-error: true
+        with:
+          path: ${{ inputs.test-root }}/.ci-out
+          key: testshards-evidence-${{ inputs.artifact-prefix }}-${{ github.run_id }}-${{ github.run_attempt }}-s6
+          fail-on-cache-miss: false
+      - name: stash s6
+        if: ${{ inputs.shards >= 6 }}
+        continue-on-error: true
+        run: |
+          d="${{ inputs.test-root }}/.ci-out"
+          mkdir -p cache-parts/s6
+          [ -d "$d" ] && { mv "$d"/* cache-parts/s6/ 2>/dev/null || true; rm -rf "$d"; }
+          echo "s6: hit='${{ steps.ev6.outputs.cache-hit }}' files=$(ls cache-parts/s6 2>/dev/null | wc -l)"
+      - uses: actions/cache/restore@v4
+        id: ev7
+        if: ${{ inputs.shards >= 7 }}
+        continue-on-error: true
+        with:
+          path: ${{ inputs.test-root }}/.ci-out
+          key: testshards-evidence-${{ inputs.artifact-prefix }}-${{ github.run_id }}-${{ github.run_attempt }}-s7
+          fail-on-cache-miss: false
+      - name: stash s7
+        if: ${{ inputs.shards >= 7 }}
+        continue-on-error: true
+        run: |
+          d="${{ inputs.test-root }}/.ci-out"
+          mkdir -p cache-parts/s7
+          [ -d "$d" ] && { mv "$d"/* cache-parts/s7/ 2>/dev/null || true; rm -rf "$d"; }
+          echo "s7: hit='${{ steps.ev7.outputs.cache-hit }}' files=$(ls cache-parts/s7 2>/dev/null | wc -l)"
+      - uses: actions/cache/restore@v4
+        id: ev8
+        if: ${{ inputs.shards >= 8 }}
+        continue-on-error: true
+        with:
+          path: ${{ inputs.test-root }}/.ci-out
+          key: testshards-evidence-${{ inputs.artifact-prefix }}-${{ github.run_id }}-${{ github.run_attempt }}-s8
+          fail-on-cache-miss: false
+      - name: stash s8
+        if: ${{ inputs.shards >= 8 }}
+        continue-on-error: true
+        run: |
+          d="${{ inputs.test-root }}/.ci-out"
+          mkdir -p cache-parts/s8
+          [ -d "$d" ] && { mv "$d"/* cache-parts/s8/ 2>/dev/null || true; rm -rf "$d"; }
+          echo "s8: hit='${{ steps.ev8.outputs.cache-hit }}' files=$(ls cache-parts/s8 2>/dev/null | wc -l)"
+      - uses: actions/cache/restore@v4
+        id: ev9
+        if: ${{ inputs.shards >= 9 }}
+        continue-on-error: true
+        with:
+          path: ${{ inputs.test-root }}/.ci-out
+          key: testshards-evidence-${{ inputs.artifact-prefix }}-${{ github.run_id }}-${{ github.run_attempt }}-s9
+          fail-on-cache-miss: false
+      - name: stash s9
+        if: ${{ inputs.shards >= 9 }}
+        continue-on-error: true
+        run: |
+          d="${{ inputs.test-root }}/.ci-out"
+          mkdir -p cache-parts/s9
+          [ -d "$d" ] && { mv "$d"/* cache-parts/s9/ 2>/dev/null || true; rm -rf "$d"; }
+          echo "s9: hit='${{ steps.ev9.outputs.cache-hit }}' files=$(ls cache-parts/s9 2>/dev/null | wc -l)"
+      - uses: actions/cache/restore@v4
+        id: ev10
+        if: ${{ inputs.shards >= 10 }}
+        continue-on-error: true
+        with:
+          path: ${{ inputs.test-root }}/.ci-out
+          key: testshards-evidence-${{ inputs.artifact-prefix }}-${{ github.run_id }}-${{ github.run_attempt }}-s10
+          fail-on-cache-miss: false
+      - name: stash s10
+        if: ${{ inputs.shards >= 10 }}
+        continue-on-error: true
+        run: |
+          d="${{ inputs.test-root }}/.ci-out"
+          mkdir -p cache-parts/s10
+          [ -d "$d" ] && { mv "$d"/* cache-parts/s10/ 2>/dev/null || true; rm -rf "$d"; }
+          echo "s10: hit='${{ steps.ev10.outputs.cache-hit }}' files=$(ls cache-parts/s10 2>/dev/null | wc -l)"
+      - uses: actions/cache/restore@v4
+        id: ev11
+        if: ${{ inputs.shards >= 11 }}
+        continue-on-error: true
+        with:
+          path: ${{ inputs.test-root }}/.ci-out
+          key: testshards-evidence-${{ inputs.artifact-prefix }}-${{ github.run_id }}-${{ github.run_attempt }}-s11
+          fail-on-cache-miss: false
+      - name: stash s11
+        if: ${{ inputs.shards >= 11 }}
+        continue-on-error: true
+        run: |
+          d="${{ inputs.test-root }}/.ci-out"
+          mkdir -p cache-parts/s11
+          [ -d "$d" ] && { mv "$d"/* cache-parts/s11/ 2>/dev/null || true; rm -rf "$d"; }
+          echo "s11: hit='${{ steps.ev11.outputs.cache-hit }}' files=$(ls cache-parts/s11 2>/dev/null | wc -l)"
+      - uses: actions/cache/restore@v4
+        id: ev12
+        if: ${{ inputs.shards >= 12 }}
+        continue-on-error: true
+        with:
+          path: ${{ inputs.test-root }}/.ci-out
+          key: testshards-evidence-${{ inputs.artifact-prefix }}-${{ github.run_id }}-${{ github.run_attempt }}-s12
+          fail-on-cache-miss: false
+      - name: stash s12
+        if: ${{ inputs.shards >= 12 }}
+        continue-on-error: true
+        run: |
+          d="${{ inputs.test-root }}/.ci-out"
+          mkdir -p cache-parts/s12
+          [ -d "$d" ] && { mv "$d"/* cache-parts/s12/ 2>/dev/null || true; rm -rf "$d"; }
+          echo "s12: hit='${{ steps.ev12.outputs.cache-hit }}' files=$(ls cache-parts/s12 2>/dev/null | wc -l)"
+      - uses: actions/cache/restore@v4
+        id: ev13
+        if: ${{ inputs.shards >= 13 }}
+        continue-on-error: true
+        with:
+          path: ${{ inputs.test-root }}/.ci-out
+          key: testshards-evidence-${{ inputs.artifact-prefix }}-${{ github.run_id }}-${{ github.run_attempt }}-s13
+          fail-on-cache-miss: false
+      - name: stash s13
+        if: ${{ inputs.shards >= 13 }}
+        continue-on-error: true
+        run: |
+          d="${{ inputs.test-root }}/.ci-out"
+          mkdir -p cache-parts/s13
+          [ -d "$d" ] && { mv "$d"/* cache-parts/s13/ 2>/dev/null || true; rm -rf "$d"; }
+          echo "s13: hit='${{ steps.ev13.outputs.cache-hit }}' files=$(ls cache-parts/s13 2>/dev/null | wc -l)"
+      - uses: actions/cache/restore@v4
+        id: ev14
+        if: ${{ inputs.shards >= 14 }}
+        continue-on-error: true
+        with:
+          path: ${{ inputs.test-root }}/.ci-out
+          key: testshards-evidence-${{ inputs.artifact-prefix }}-${{ github.run_id }}-${{ github.run_attempt }}-s14
+          fail-on-cache-miss: false
+      - name: stash s14
+        if: ${{ inputs.shards >= 14 }}
+        continue-on-error: true
+        run: |
+          d="${{ inputs.test-root }}/.ci-out"
+          mkdir -p cache-parts/s14
+          [ -d "$d" ] && { mv "$d"/* cache-parts/s14/ 2>/dev/null || true; rm -rf "$d"; }
+          echo "s14: hit='${{ steps.ev14.outputs.cache-hit }}' files=$(ls cache-parts/s14 2>/dev/null | wc -l)"
+      - uses: actions/cache/restore@v4
+        id: ev15
+        if: ${{ inputs.shards >= 15 }}
+        continue-on-error: true
+        with:
+          path: ${{ inputs.test-root }}/.ci-out
+          key: testshards-evidence-${{ inputs.artifact-prefix }}-${{ github.run_id }}-${{ github.run_attempt }}-s15
+          fail-on-cache-miss: false
+      - name: stash s15
+        if: ${{ inputs.shards >= 15 }}
+        continue-on-error: true
+        run: |
+          d="${{ inputs.test-root }}/.ci-out"
+          mkdir -p cache-parts/s15
+          [ -d "$d" ] && { mv "$d"/* cache-parts/s15/ 2>/dev/null || true; rm -rf "$d"; }
+          echo "s15: hit='${{ steps.ev15.outputs.cache-hit }}' files=$(ls cache-parts/s15 2>/dev/null | wc -l)"
+      - uses: actions/cache/restore@v4
+        id: ev16
+        if: ${{ inputs.shards >= 16 }}
+        continue-on-error: true
+        with:
+          path: ${{ inputs.test-root }}/.ci-out
+          key: testshards-evidence-${{ inputs.artifact-prefix }}-${{ github.run_id }}-${{ github.run_attempt }}-s16
+          fail-on-cache-miss: false
+      - name: stash s16
+        if: ${{ inputs.shards >= 16 }}
+        continue-on-error: true
+        run: |
+          d="${{ inputs.test-root }}/.ci-out"
+          mkdir -p cache-parts/s16
+          [ -d "$d" ] && { mv "$d"/* cache-parts/s16/ 2>/dev/null || true; rm -rf "$d"; }
+          echo "s16: hit='${{ steps.ev16.outputs.cache-hit }}' files=$(ls cache-parts/s16 2>/dev/null | wc -l)"
+
       - name: Every unit ran, exactly once
         run: |
           set -euo pipefail
-          find parts -name 'shard-*.tsv' -exec cat {} + | sort -u > all-shards.tsv || : > all-shards.tsv
-          find parts -name 'ran-*.tsv'   -exec cat {} + | sort -u > all-ran.tsv    || : > all-ran.tsv
-          find parts -name 'ended-*.tsv' -exec cat {} + | sort -u > all-ended.tsv  || : > all-ended.tsv
+          mkdir -p parts cache-parts
+          find parts cache-parts -name 'shard-*.tsv' -exec cat {} + | sort -u > all-shards.tsv || : > all-shards.tsv
+          find parts cache-parts -name 'ran-*.tsv'   -exec cat {} + | sort -u > all-ran.tsv    || : > all-ran.tsv
+          find parts cache-parts -name 'ended-*.tsv' -exec cat {} + | sort -u > all-ended.tsv  || : > all-ended.tsv
           # tee, not redirect: when this fails it is a required check going red, and the
           # reason has to be in the log people open first, not only in the run summary.
           julia --startup-file=no --project="$RUNNER_TEMP/tsenv" -e '
