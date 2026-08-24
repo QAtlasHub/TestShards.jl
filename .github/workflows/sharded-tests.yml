@@ -663,6 +663,13 @@ jobs:
       # action and its first reference cannot land together — #84), and a quota of its own.
       # Measured: ~373 B per file, three files, ~1.1 kB a shard.
       #
+      # THE KEY MUST NAME THE CALLER, not just the run. This workflow is reusable and a single run
+      # can invoke it more than once — this repo's own CI does, `ci` with 8 shards and `solo` with
+      # 1 — so a key of `run_id + sid` alone makes the second caller's collector restore the FIRST
+      # caller's shard. Measured: `solo`'s gate reported "3 unit(s) ran twice: 1 on local and s1",
+      # because its own evidence is labelled `local` while what it picked up was `ci`'s `s1`.
+      # `artifact-prefix` is the discriminator this workflow already uses for exactly this.
+      #
       # THE PATH MUST MATCH THE RESTORE'S EXACTLY. A cache entry is identified by its key AND by a
       # version derived from the `path` inputs, so saving one path and restoring into another is a
       # miss on an identical key — "Cache saved with key: X" and "Cache not found for input keys: X"
@@ -673,7 +680,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: ${{ inputs.test-root }}/.ci-out
-          key: testshards-evidence-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.sid }}
+          key: testshards-evidence-${{ inputs.artifact-prefix }}-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.sid }}
 
   collect:
     name: Collect coverage and records
@@ -838,7 +845,7 @@ jobs:
         continue-on-error: true
         with:
           path: ${{ inputs.test-root }}/.ci-out
-          key: testshards-evidence-${{ github.run_id }}-${{ github.run_attempt }}-s1
+          key: testshards-evidence-${{ inputs.artifact-prefix }}-${{ github.run_id }}-${{ github.run_attempt }}-s1
           fail-on-cache-miss: false
       - name: stash s1
         if: ${{ inputs.shards >= 1 }}
@@ -854,7 +861,7 @@ jobs:
         continue-on-error: true
         with:
           path: ${{ inputs.test-root }}/.ci-out
-          key: testshards-evidence-${{ github.run_id }}-${{ github.run_attempt }}-s2
+          key: testshards-evidence-${{ inputs.artifact-prefix }}-${{ github.run_id }}-${{ github.run_attempt }}-s2
           fail-on-cache-miss: false
       - name: stash s2
         if: ${{ inputs.shards >= 2 }}
@@ -870,7 +877,7 @@ jobs:
         continue-on-error: true
         with:
           path: ${{ inputs.test-root }}/.ci-out
-          key: testshards-evidence-${{ github.run_id }}-${{ github.run_attempt }}-s3
+          key: testshards-evidence-${{ inputs.artifact-prefix }}-${{ github.run_id }}-${{ github.run_attempt }}-s3
           fail-on-cache-miss: false
       - name: stash s3
         if: ${{ inputs.shards >= 3 }}
@@ -886,7 +893,7 @@ jobs:
         continue-on-error: true
         with:
           path: ${{ inputs.test-root }}/.ci-out
-          key: testshards-evidence-${{ github.run_id }}-${{ github.run_attempt }}-s4
+          key: testshards-evidence-${{ inputs.artifact-prefix }}-${{ github.run_id }}-${{ github.run_attempt }}-s4
           fail-on-cache-miss: false
       - name: stash s4
         if: ${{ inputs.shards >= 4 }}
@@ -902,7 +909,7 @@ jobs:
         continue-on-error: true
         with:
           path: ${{ inputs.test-root }}/.ci-out
-          key: testshards-evidence-${{ github.run_id }}-${{ github.run_attempt }}-s5
+          key: testshards-evidence-${{ inputs.artifact-prefix }}-${{ github.run_id }}-${{ github.run_attempt }}-s5
           fail-on-cache-miss: false
       - name: stash s5
         if: ${{ inputs.shards >= 5 }}
@@ -918,7 +925,7 @@ jobs:
         continue-on-error: true
         with:
           path: ${{ inputs.test-root }}/.ci-out
-          key: testshards-evidence-${{ github.run_id }}-${{ github.run_attempt }}-s6
+          key: testshards-evidence-${{ inputs.artifact-prefix }}-${{ github.run_id }}-${{ github.run_attempt }}-s6
           fail-on-cache-miss: false
       - name: stash s6
         if: ${{ inputs.shards >= 6 }}
@@ -934,7 +941,7 @@ jobs:
         continue-on-error: true
         with:
           path: ${{ inputs.test-root }}/.ci-out
-          key: testshards-evidence-${{ github.run_id }}-${{ github.run_attempt }}-s7
+          key: testshards-evidence-${{ inputs.artifact-prefix }}-${{ github.run_id }}-${{ github.run_attempt }}-s7
           fail-on-cache-miss: false
       - name: stash s7
         if: ${{ inputs.shards >= 7 }}
@@ -950,7 +957,7 @@ jobs:
         continue-on-error: true
         with:
           path: ${{ inputs.test-root }}/.ci-out
-          key: testshards-evidence-${{ github.run_id }}-${{ github.run_attempt }}-s8
+          key: testshards-evidence-${{ inputs.artifact-prefix }}-${{ github.run_id }}-${{ github.run_attempt }}-s8
           fail-on-cache-miss: false
       - name: stash s8
         if: ${{ inputs.shards >= 8 }}
@@ -966,7 +973,7 @@ jobs:
         continue-on-error: true
         with:
           path: ${{ inputs.test-root }}/.ci-out
-          key: testshards-evidence-${{ github.run_id }}-${{ github.run_attempt }}-s9
+          key: testshards-evidence-${{ inputs.artifact-prefix }}-${{ github.run_id }}-${{ github.run_attempt }}-s9
           fail-on-cache-miss: false
       - name: stash s9
         if: ${{ inputs.shards >= 9 }}
@@ -982,7 +989,7 @@ jobs:
         continue-on-error: true
         with:
           path: ${{ inputs.test-root }}/.ci-out
-          key: testshards-evidence-${{ github.run_id }}-${{ github.run_attempt }}-s10
+          key: testshards-evidence-${{ inputs.artifact-prefix }}-${{ github.run_id }}-${{ github.run_attempt }}-s10
           fail-on-cache-miss: false
       - name: stash s10
         if: ${{ inputs.shards >= 10 }}
@@ -998,7 +1005,7 @@ jobs:
         continue-on-error: true
         with:
           path: ${{ inputs.test-root }}/.ci-out
-          key: testshards-evidence-${{ github.run_id }}-${{ github.run_attempt }}-s11
+          key: testshards-evidence-${{ inputs.artifact-prefix }}-${{ github.run_id }}-${{ github.run_attempt }}-s11
           fail-on-cache-miss: false
       - name: stash s11
         if: ${{ inputs.shards >= 11 }}
@@ -1014,7 +1021,7 @@ jobs:
         continue-on-error: true
         with:
           path: ${{ inputs.test-root }}/.ci-out
-          key: testshards-evidence-${{ github.run_id }}-${{ github.run_attempt }}-s12
+          key: testshards-evidence-${{ inputs.artifact-prefix }}-${{ github.run_id }}-${{ github.run_attempt }}-s12
           fail-on-cache-miss: false
       - name: stash s12
         if: ${{ inputs.shards >= 12 }}
@@ -1030,7 +1037,7 @@ jobs:
         continue-on-error: true
         with:
           path: ${{ inputs.test-root }}/.ci-out
-          key: testshards-evidence-${{ github.run_id }}-${{ github.run_attempt }}-s13
+          key: testshards-evidence-${{ inputs.artifact-prefix }}-${{ github.run_id }}-${{ github.run_attempt }}-s13
           fail-on-cache-miss: false
       - name: stash s13
         if: ${{ inputs.shards >= 13 }}
@@ -1046,7 +1053,7 @@ jobs:
         continue-on-error: true
         with:
           path: ${{ inputs.test-root }}/.ci-out
-          key: testshards-evidence-${{ github.run_id }}-${{ github.run_attempt }}-s14
+          key: testshards-evidence-${{ inputs.artifact-prefix }}-${{ github.run_id }}-${{ github.run_attempt }}-s14
           fail-on-cache-miss: false
       - name: stash s14
         if: ${{ inputs.shards >= 14 }}
@@ -1062,7 +1069,7 @@ jobs:
         continue-on-error: true
         with:
           path: ${{ inputs.test-root }}/.ci-out
-          key: testshards-evidence-${{ github.run_id }}-${{ github.run_attempt }}-s15
+          key: testshards-evidence-${{ inputs.artifact-prefix }}-${{ github.run_id }}-${{ github.run_attempt }}-s15
           fail-on-cache-miss: false
       - name: stash s15
         if: ${{ inputs.shards >= 15 }}
@@ -1078,7 +1085,7 @@ jobs:
         continue-on-error: true
         with:
           path: ${{ inputs.test-root }}/.ci-out
-          key: testshards-evidence-${{ github.run_id }}-${{ github.run_attempt }}-s16
+          key: testshards-evidence-${{ inputs.artifact-prefix }}-${{ github.run_id }}-${{ github.run_attempt }}-s16
           fail-on-cache-miss: false
       - name: stash s16
         if: ${{ inputs.shards >= 16 }}
