@@ -677,7 +677,7 @@ jobs:
       - name: Cache this shard's evidence — the road that survives a full artifact quota
         if: always()
         continue-on-error: true
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: ${{ inputs.test-root }}/.ci-out
           key: testshards-evidence-${{ inputs.artifact-prefix }}-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.sid }}
@@ -839,7 +839,7 @@ jobs:
       # A LADDER rather than a loop, because `uses:` cannot be looped and the shard count is an
       # input. Sixteen covers twice the default; a run with more shards keeps the artifact road,
       # which is the behaviour it has today.
-      - uses: actions/cache/restore@v4
+      - uses: actions/cache/restore@v6
         id: ev1
         if: ${{ inputs.shards >= 1 }}
         continue-on-error: true
@@ -855,7 +855,7 @@ jobs:
           mkdir -p cache-parts/s1
           [ -d "$d" ] && { mv "$d"/* cache-parts/s1/ 2>/dev/null || true; rm -rf "$d"; }
           echo "s1: hit='${{ steps.ev1.outputs.cache-hit }}' files=$(ls cache-parts/s1 2>/dev/null | wc -l)"
-      - uses: actions/cache/restore@v4
+      - uses: actions/cache/restore@v6
         id: ev2
         if: ${{ inputs.shards >= 2 }}
         continue-on-error: true
@@ -871,7 +871,7 @@ jobs:
           mkdir -p cache-parts/s2
           [ -d "$d" ] && { mv "$d"/* cache-parts/s2/ 2>/dev/null || true; rm -rf "$d"; }
           echo "s2: hit='${{ steps.ev2.outputs.cache-hit }}' files=$(ls cache-parts/s2 2>/dev/null | wc -l)"
-      - uses: actions/cache/restore@v4
+      - uses: actions/cache/restore@v6
         id: ev3
         if: ${{ inputs.shards >= 3 }}
         continue-on-error: true
@@ -887,7 +887,7 @@ jobs:
           mkdir -p cache-parts/s3
           [ -d "$d" ] && { mv "$d"/* cache-parts/s3/ 2>/dev/null || true; rm -rf "$d"; }
           echo "s3: hit='${{ steps.ev3.outputs.cache-hit }}' files=$(ls cache-parts/s3 2>/dev/null | wc -l)"
-      - uses: actions/cache/restore@v4
+      - uses: actions/cache/restore@v6
         id: ev4
         if: ${{ inputs.shards >= 4 }}
         continue-on-error: true
@@ -903,7 +903,7 @@ jobs:
           mkdir -p cache-parts/s4
           [ -d "$d" ] && { mv "$d"/* cache-parts/s4/ 2>/dev/null || true; rm -rf "$d"; }
           echo "s4: hit='${{ steps.ev4.outputs.cache-hit }}' files=$(ls cache-parts/s4 2>/dev/null | wc -l)"
-      - uses: actions/cache/restore@v4
+      - uses: actions/cache/restore@v6
         id: ev5
         if: ${{ inputs.shards >= 5 }}
         continue-on-error: true
@@ -919,7 +919,7 @@ jobs:
           mkdir -p cache-parts/s5
           [ -d "$d" ] && { mv "$d"/* cache-parts/s5/ 2>/dev/null || true; rm -rf "$d"; }
           echo "s5: hit='${{ steps.ev5.outputs.cache-hit }}' files=$(ls cache-parts/s5 2>/dev/null | wc -l)"
-      - uses: actions/cache/restore@v4
+      - uses: actions/cache/restore@v6
         id: ev6
         if: ${{ inputs.shards >= 6 }}
         continue-on-error: true
@@ -935,7 +935,7 @@ jobs:
           mkdir -p cache-parts/s6
           [ -d "$d" ] && { mv "$d"/* cache-parts/s6/ 2>/dev/null || true; rm -rf "$d"; }
           echo "s6: hit='${{ steps.ev6.outputs.cache-hit }}' files=$(ls cache-parts/s6 2>/dev/null | wc -l)"
-      - uses: actions/cache/restore@v4
+      - uses: actions/cache/restore@v6
         id: ev7
         if: ${{ inputs.shards >= 7 }}
         continue-on-error: true
@@ -951,7 +951,7 @@ jobs:
           mkdir -p cache-parts/s7
           [ -d "$d" ] && { mv "$d"/* cache-parts/s7/ 2>/dev/null || true; rm -rf "$d"; }
           echo "s7: hit='${{ steps.ev7.outputs.cache-hit }}' files=$(ls cache-parts/s7 2>/dev/null | wc -l)"
-      - uses: actions/cache/restore@v4
+      - uses: actions/cache/restore@v6
         id: ev8
         if: ${{ inputs.shards >= 8 }}
         continue-on-error: true
@@ -967,7 +967,7 @@ jobs:
           mkdir -p cache-parts/s8
           [ -d "$d" ] && { mv "$d"/* cache-parts/s8/ 2>/dev/null || true; rm -rf "$d"; }
           echo "s8: hit='${{ steps.ev8.outputs.cache-hit }}' files=$(ls cache-parts/s8 2>/dev/null | wc -l)"
-      - uses: actions/cache/restore@v4
+      - uses: actions/cache/restore@v6
         id: ev9
         if: ${{ inputs.shards >= 9 }}
         continue-on-error: true
@@ -983,7 +983,7 @@ jobs:
           mkdir -p cache-parts/s9
           [ -d "$d" ] && { mv "$d"/* cache-parts/s9/ 2>/dev/null || true; rm -rf "$d"; }
           echo "s9: hit='${{ steps.ev9.outputs.cache-hit }}' files=$(ls cache-parts/s9 2>/dev/null | wc -l)"
-      - uses: actions/cache/restore@v4
+      - uses: actions/cache/restore@v6
         id: ev10
         if: ${{ inputs.shards >= 10 }}
         continue-on-error: true
@@ -999,7 +999,7 @@ jobs:
           mkdir -p cache-parts/s10
           [ -d "$d" ] && { mv "$d"/* cache-parts/s10/ 2>/dev/null || true; rm -rf "$d"; }
           echo "s10: hit='${{ steps.ev10.outputs.cache-hit }}' files=$(ls cache-parts/s10 2>/dev/null | wc -l)"
-      - uses: actions/cache/restore@v4
+      - uses: actions/cache/restore@v6
         id: ev11
         if: ${{ inputs.shards >= 11 }}
         continue-on-error: true
@@ -1015,7 +1015,7 @@ jobs:
           mkdir -p cache-parts/s11
           [ -d "$d" ] && { mv "$d"/* cache-parts/s11/ 2>/dev/null || true; rm -rf "$d"; }
           echo "s11: hit='${{ steps.ev11.outputs.cache-hit }}' files=$(ls cache-parts/s11 2>/dev/null | wc -l)"
-      - uses: actions/cache/restore@v4
+      - uses: actions/cache/restore@v6
         id: ev12
         if: ${{ inputs.shards >= 12 }}
         continue-on-error: true
@@ -1031,7 +1031,7 @@ jobs:
           mkdir -p cache-parts/s12
           [ -d "$d" ] && { mv "$d"/* cache-parts/s12/ 2>/dev/null || true; rm -rf "$d"; }
           echo "s12: hit='${{ steps.ev12.outputs.cache-hit }}' files=$(ls cache-parts/s12 2>/dev/null | wc -l)"
-      - uses: actions/cache/restore@v4
+      - uses: actions/cache/restore@v6
         id: ev13
         if: ${{ inputs.shards >= 13 }}
         continue-on-error: true
@@ -1047,7 +1047,7 @@ jobs:
           mkdir -p cache-parts/s13
           [ -d "$d" ] && { mv "$d"/* cache-parts/s13/ 2>/dev/null || true; rm -rf "$d"; }
           echo "s13: hit='${{ steps.ev13.outputs.cache-hit }}' files=$(ls cache-parts/s13 2>/dev/null | wc -l)"
-      - uses: actions/cache/restore@v4
+      - uses: actions/cache/restore@v6
         id: ev14
         if: ${{ inputs.shards >= 14 }}
         continue-on-error: true
@@ -1063,7 +1063,7 @@ jobs:
           mkdir -p cache-parts/s14
           [ -d "$d" ] && { mv "$d"/* cache-parts/s14/ 2>/dev/null || true; rm -rf "$d"; }
           echo "s14: hit='${{ steps.ev14.outputs.cache-hit }}' files=$(ls cache-parts/s14 2>/dev/null | wc -l)"
-      - uses: actions/cache/restore@v4
+      - uses: actions/cache/restore@v6
         id: ev15
         if: ${{ inputs.shards >= 15 }}
         continue-on-error: true
@@ -1079,7 +1079,7 @@ jobs:
           mkdir -p cache-parts/s15
           [ -d "$d" ] && { mv "$d"/* cache-parts/s15/ 2>/dev/null || true; rm -rf "$d"; }
           echo "s15: hit='${{ steps.ev15.outputs.cache-hit }}' files=$(ls cache-parts/s15 2>/dev/null | wc -l)"
-      - uses: actions/cache/restore@v4
+      - uses: actions/cache/restore@v6
         id: ev16
         if: ${{ inputs.shards >= 16 }}
         continue-on-error: true
