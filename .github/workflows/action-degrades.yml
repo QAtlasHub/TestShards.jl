@@ -1,0 +1,73 @@
+name: upload-coverage degrades on an absent report
+
+# THE TEST #83 DID NOT HAVE, and the reason it was closed:
+#
+#   "This repository is public, so its storage is free and its own CI cannot reach the
+#    absent-artifact state by accident — it has to be constructed."
+#
+# So it is constructed here. `upload-coverage` is asked for an artifact that cannot exist, and the
+# job must come back GREEN with the absence annotated. An absent report is not a coverage bug:
+# coverage is a REPORT, `Every unit ran, exactly once` is a CORRECTNESS CLAIM, and only the second
+# should be able to fail a suite.
+#
+# Without this, the degrade path ships untested and is exercised for the first time on a private
+# consumer whose org has run out of Actions storage — which is exactly where it was needed and
+# exactly where nobody can watch it.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  absent:
+    name: an artifact that cannot exist
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # No artifact of this name is produced by any job in this run, so the download finds nothing.
+      # `name:` would hard-fail here; `pattern:` is what makes the difference the action now relies
+      # on, and this step is what keeps that true.
+      - id: run
+        uses: ./actions/upload-coverage
+        with:
+          artifact: no-such-artifact-${{ github.run_id }}
+          codecov-token: ''
+
+      - name: the job survived, and said why
+        run: |
+          set -euo pipefail
+          echo "reached the step after upload-coverage — the action did not abort the job"
+
+  present:
+    name: a report that does exist still uploads-or-degrades cleanly
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # THE POSITIVE CONTROL. Without it, an action that did nothing at all would pass the job
+      # above, and "degrades on absence" would be indistinguishable from "never works".
+      - name: Build a real lcov and publish it
+        run: |
+          set -euo pipefail
+          printf 'SF:src/Fake.jl\nDA:1,1\nDA:2,0\nend_of_record\n' > lcov.info
+          grep -c '^SF:' lcov.info
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: degrade-probe-lcov
+          path: lcov.info
+          retention-days: 1
+
+      - uses: ./actions/upload-coverage
+        with:
+          artifact: degrade-probe-lcov
+          codecov-token: ''
+
+      - name: it found the report
+        run: echo "the present-report path ran to completion"

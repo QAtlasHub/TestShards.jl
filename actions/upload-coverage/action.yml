@@ -116,18 +116,39 @@ runs:
       with:
         submodules: ${{ inputs.submodules }}
 
+    # BY PATTERN, NOT BY NAME, and the difference is the whole fix. `download-artifact` by `name:`
+    # HARD-FAILS when the artifact is absent; by `pattern:` it succeeds with zero results. That
+    # asymmetry is why `collect` reaches its completeness gate under a full artifact quota while
+    # this job used to die at step two — same missing artifact, two different outcomes.
+    #
+    # An absent report is not a coverage BUG. Coverage is a report; "every unit ran exactly once" is
+    # a correctness claim, and only the second should be able to fail a suite. A private consumer
+    # whose org has run out of Actions storage was getting a red required check for a run whose
+    # tests were all green — for days, because storage is accrued in GigabyteHours and does not fall
+    # when artifacts are deleted, so it does not recover until the billing period rolls over.
     - uses: actions/download-artifact@v8
+      id: fetch
       with:
-        name: ${{ inputs.artifact }}
+        pattern: ${{ inputs.artifact }}
+        merge-multiple: true
 
-    - shell: bash
+    - id: report
+      shell: bash
       run: |
         set -euo pipefail
-        [ -s lcov.info ] || { echo "::error::${{ inputs.artifact }} contained no lcov.info — did the sharded run finish with coverage on?"; exit 1; }
+        if [ ! -s lcov.info ]; then
+          # LOUD, and not fatal. The absence is annotated and summarised; what it must not do is
+          # gate a suite on a report.
+          echo "::warning::no ${{ inputs.artifact }} to upload — the sharded run produced no merged report. Coverage is NOT being sent; the tests themselves are unaffected."
+          echo "Coverage **not uploaded**: no \`${{ inputs.artifact }}\` artifact. Under a full Actions storage quota this is expected and says nothing about the tests." >> "$GITHUB_STEP_SUMMARY"
+          echo "have=false" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
         echo "Merged report: $(grep -c '^SF:' lcov.info) source files."
+        echo "have=true" >> "$GITHUB_OUTPUT"
 
     - uses: codecov/codecov-action@v7
-      if: ${{ steps.token.outputs.have == 'true' }}
+      if: ${{ steps.token.outputs.have == 'true' && steps.report.outputs.have == 'true' }}
       continue-on-error: ${{ inputs.fail-on-error != 'true' }}
       with:
         files: lcov.info
