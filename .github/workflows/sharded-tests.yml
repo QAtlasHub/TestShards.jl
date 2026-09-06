@@ -1169,7 +1169,14 @@ jobs:
   timings:
     name: Record timing history
     needs: test
-    if: ${{ inputs.record-timings && (github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && needs.test.result == 'success') }}
+    # `!cancelled()` is load-bearing, not decoration. `test` needs `prebuild`, which is skipped
+    # whenever the input is off — its default — and a job whose `if` carries no status-check
+    # function inherits that skip through the graph even though `test` itself ran and passed.
+    # Measured: on every consumer this job has been skipped since #36 introduced `prebuild`,
+    # while `needs.test.result` was `success` the whole time — `gate`, which checks exactly that
+    # and fails the run if it is not `success`, has been green on the same runs. The two
+    # siblings that survived, `collect` and `gate`, both carry `always()`; this one did not.
+    if: ${{ !cancelled() && inputs.record-timings && github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && needs.test.result == 'success' }}
     runs-on: ${{ fromJSON(inputs.helper-runner) }}
     permissions:
       contents: write                   # force-pushes the ci-timings orphan branch
