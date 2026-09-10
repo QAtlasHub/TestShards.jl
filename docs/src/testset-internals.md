@@ -8,7 +8,7 @@ implementations of the same six lines.
 
 A top-level `@testset` **throws instead of returning** when something inside it fails. TestShards
 needs the opposite: a failed unit's tree has to be readable, because the counts in
-[`unit_fold`](@ref) and the per-unit record are built from it, and because the remaining units
+`unit_fold` and the per-unit record are built from it, and because the remaining units
 still have to run. So `_run` enters the testset itself, runs the body, leaves, and re-signals
 failure once at the end of the whole shard.
 
