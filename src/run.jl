@@ -14,6 +14,20 @@
 # `CURRENT_TESTSET` is public API. The alternative — using `@testset` and reading its return —
 # is not available, because a top-level `@testset` throws instead of returning when the unit
 # fails, which is the whole reason this function exists.
+#
+# `TESTSET_DEPTH` moves with `CURRENT_TESTSET` because two things read it, and both fail
+# QUIETLY if it says 0. `Test.finish` uses it to decide whether a testset is top-level — a
+# top-level one THROWS instead of recording, so a failing nested `@testset` inside a unit would
+# be caught by `_run` below and filed as an `:nontest_error`, turning a FAIL into an ERROR. And
+# stdlib's `@testset` infers an untyped nested set's type as
+# `get_testset_depth() == 0 ? DefaultTestSet : typeof(get_testset())`, so a 0 there drops a
+# registered provider's type (see `provider.jl`) — which is the case that reports nothing at all
+# and reports it silently.
+#
+# The scope is inherited by tasks SPAWNED inside it, which task-local storage was not. For a
+# unit that joins what it spawns that is strictly better — results that used to vanish into the
+# fallback testset now land correctly. For one that does not join, it converts a deterministic
+# drop into a race against `unit_fold`; `@shard`'s docstring states the requirement.
 @static if VERSION >= v"1.13"
     function _with_testset(f, ts)
         return Base.ScopedValues.with(
@@ -65,6 +79,10 @@ function _run(ctx::ShardContext, key::AbstractString, body)
             # recorded.
             Test.record(
                 ts,
+                # XXX: `Base.catch_stack` is an internal spelling of what is now
+                # `Base.current_exceptions()`; measured on 1.13 the two return the same
+                # `Base.ExceptionStack` (`==`), and upstream's own `@testset` has moved to the
+                # public name. Left as-is so this commit changes one thing.
                 Test.Error(
                     :nontest_error, Expr(:tuple), err, Base.catch_stack(), LineNumberNode(0)
                 ),
@@ -72,7 +90,7 @@ function _run(ctx::ShardContext, key::AbstractString, body)
         end
     end
     # A tool that attaches a finished testset to its parent can only do it now that the parent is
-    # current again — which is the whole reason a hand-popped testset needs this second step.
+    # current again — which is the whole reason a hand-entered testset needs this second step.
     _unit_close(ts)
     dt = time() - t0
     sec = unit_fold(ctx, ts)
@@ -275,6 +293,14 @@ docstring for the whole picture.
 
 The test root — what unit keys are relative to — is the directory of the file this macro is
 written in, so keys are stable no matter where CI runs from.
+
+A unit must `wait`/`fetch`/`@sync` every task it spawns before its own top-level code returns.
+A unit is folded and reported the moment that code returns, so a result arriving later is
+recorded into a testset nobody reads again. On Julia ≥ 1.13 this is worse than it sounds: a
+spawned task inherits the unit's testset for its whole life, so a LATE FAILURE lands on the
+right object after the unit has already been reported green. Before 1.13 the same result was
+dropped on the floor instead — deterministically, which is the only thing that made it
+survivable.
 """
 macro shard(body)
     root = abspath(dirname(String(__source__.file)))

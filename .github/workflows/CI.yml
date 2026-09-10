@@ -130,7 +130,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        julia: ['1.10']
+        # The floor, and the version at which `Test`'s testset stack became a `ScopedValue`.
+        # `_with_testset` has one implementation per side of that boundary and only ONE is
+        # compiled per run, so pinning both is the only way each stays under test — the sharded
+        # jobs above take whatever `'1'` resolves to, which moves with Julia's release calendar.
+        julia: ['1.10', '1.13']
     steps:
       - uses: actions/checkout@v7
       - uses: julia-actions/setup-julia@v3
