@@ -4,31 +4,11 @@
 
 # Run `f` with `ts` as the current testset, and leave the previous one current afterwards.
 #
-# Two implementations because Julia 1.13 changed what "current testset" IS. Through 1.12 it was
-# a STACK in task-local storage, entered with `Test.push_testset` and left with
-# `Test.pop_testset`. In 1.13 it became a `ScopedValue` (`Test.CURRENT_TESTSET`), which cannot
-# be pushed and popped at all — a scoped value is entered, and `push_testset`/`pop_testset` no
-# longer exist. `Test.@testset` itself switched to `@with` for the same reason.
-#
-# Both spellings reach into Test's internals, which is what breaks: neither `push_testset` nor
-# `CURRENT_TESTSET` is public API. The alternative — using `@testset` and reading its return —
-# is not available, because a top-level `@testset` throws instead of returning when the unit
-# fails, which is the whole reason this function exists.
-#
-# `TESTSET_DEPTH` moves with `CURRENT_TESTSET` because two things read it, and both fail
-# QUIETLY if it says 0. `Test.finish` uses it to decide whether a testset is top-level — a
-# top-level one THROWS instead of recording, so a failing nested `@testset` inside a unit would
-# be caught by `_run` below and filed as an `:nontest_error`, turning a FAIL into an ERROR. And
-# stdlib's `@testset` infers an untyped nested set's type as
-# `get_testset_depth() == 0 ? DefaultTestSet : typeof(get_testset())`, so a 0 there drops a
-# registered provider's type (see `provider.jl`) — which is the case that reports nothing at all
-# and reports it silently.
-#
-# The scope is inherited by tasks SPAWNED inside it, which task-local storage was not. For a
-# unit that joins what it spawns that is strictly better — results that used to vanish into the
-# fallback testset now land correctly. For one that does not join, it converts a deterministic
-# drop into a race against `unit_fold`; `@shard`'s docstring states the requirement.
-@static if VERSION >= v"1.13"
+# Two implementations because Julia 1.13 replaced the testset stack with a `ScopedValue`. Both
+# reach into `Test` internals; the branch tests for the NAME rather than the version, and
+# `TESTSET_DEPTH` has to travel with `CURRENT_TESTSET`. Why, for all three, is in
+# `docs/src/testset-internals.md`.
+@static if isdefined(Test, :CURRENT_TESTSET)
     function _with_testset(f, ts)
         return Base.ScopedValues.with(
             f,
@@ -79,10 +59,8 @@ function _run(ctx::ShardContext, key::AbstractString, body)
             # recorded.
             Test.record(
                 ts,
-                # XXX: `Base.catch_stack` is an internal spelling of what is now
-                # `Base.current_exceptions()`; measured on 1.13 the two return the same
-                # `Base.ExceptionStack` (`==`), and upstream's own `@testset` has moved to the
-                # public name. Left as-is so this commit changes one thing.
+                # XXX: `Base.catch_stack` is internal; `Base.current_exceptions()` is
+                # the public spelling — see `docs/src/testset-internals.md`.
                 Test.Error(
                     :nontest_error, Expr(:tuple), err, Base.catch_stack(), LineNumberNode(0)
                 ),
