@@ -13,8 +13,8 @@
 # So the type is a registered choice. A provider supplies three operations:
 #
 #   open(key)  -> an AbstractTestSet, or `nothing` to decline this unit (use the default)
-#   close(ts)  -> nothing; run after the testset is popped, for a tool that attaches a finished
-#                 set to its parent there (`Test.finish` does exactly that)
+#   close(ts)  -> nothing; run after the testset stops being current, for a tool that attaches
+#                 a finished set to its parent there (`Test.finish` does exactly that)
 #   fold(ts)   -> the counts + structure, as PLAIN DATA (see `unit_fold`)
 #
 # `open` returning `nothing` is what keeps this inert: a provider decides per unit whether its
@@ -36,8 +36,8 @@ rather than a method override, so nothing is overwritten at precompile time.
   - `open(key::String)` returns the `AbstractTestSet` for a unit, or **`nothing`** to decline it
     and leave the default in place. Decline unless the tool's capture is actually running: a
     suite that merely depends on the tool must not have its testset type changed underneath it.
-  - `close(ts)` runs after the testset is popped. A tool that attaches a finished testset to its
-    parent does it here (`Test.finish`), which is the only moment at which it can.
+  - `close(ts)` runs after the testset stops being current. A tool that attaches a finished
+    testset to its parent does it here (`Test.finish`), which is the only moment at which it can.
   - `fold(ts)` returns the counts and structure as plain data — see [`unit_fold`](@ref). This is
     what keeps the balancing history and the completeness verdict correct when the testset is not
     ours, and it is the first thing to test: the same suite must yield the same numbers whichever

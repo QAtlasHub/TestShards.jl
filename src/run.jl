@@ -2,6 +2,31 @@
 # Running a unit
 # ─────────────────────────────────────────────────────────────────────────────────────
 
+# Run `f` with `ts` as the current testset, and leave the previous one current afterwards.
+#
+# Two implementations because Julia 1.13 replaced the testset stack with a `ScopedValue`. Both
+# reach into `Test` internals; the branch tests for the NAME rather than the version, and
+# `TESTSET_DEPTH` has to travel with `CURRENT_TESTSET`. Why, for all three, is in
+# `docs/src/testset-internals.md`.
+@static if isdefined(Test, :CURRENT_TESTSET)
+    function _with_testset(f, ts)
+        return Base.ScopedValues.with(
+            f,
+            Test.CURRENT_TESTSET => ts,
+            Test.TESTSET_DEPTH => Test.get_testset_depth() + 1,
+        )
+    end
+else
+    function _with_testset(f, ts)
+        Test.push_testset(ts)
+        try
+            return f()
+        finally
+            Test.pop_testset()
+        end
+    end
+end
+
 function _key(ctx::ShardContext, path::AbstractString)
     return replace(relpath(abspath(path), ctx.root), '\\' => '/')
 end
@@ -12,9 +37,10 @@ end
 Observe a unit, and run `body` if this shard owns it. The observation counter advances either
 way — that is what keeps `index`, and the round-robin fallback, identical across shards.
 
-The testset is pushed and popped by hand rather than via `@testset` so that the tree can be
-read back even when the unit failed: a top-level `@testset` throws before returning its result.
-Failure is re-signalled once, at the end of the whole block.
+The testset is entered by hand rather than via `@testset` so that the tree can be read back
+even when the unit failed: a top-level `@testset` throws before returning its result (still
+true on 1.13 — measured, not assumed). Failure is re-signalled once, at the end of the whole
+block.
 """
 function _run(ctx::ShardContext, key::AbstractString, body)
     ctx.seen += 1
@@ -23,24 +49,26 @@ function _run(ctx::ShardContext, key::AbstractString, body)
     push!(ctx.ran, (index, String(key)))
 
     ts = _unit_testset(key)
-    Test.push_testset(ts)
     t0 = time()
-    try
-        body()
-    catch err
-        # An error escaping the unit (a load error, say) is recorded as the unit's error rather
-        # than aborting the shard, so the remaining units still run and still get recorded.
-        Test.record(
-            ts,
-            Test.Error(
-                :nontest_error, Expr(:tuple), err, Base.catch_stack(), LineNumberNode(0)
-            ),
-        )
-    finally
-        Test.pop_testset()
+    _with_testset(ts) do
+        try
+            body()
+        catch err
+            # An error escaping the unit (a load error, say) is recorded as the unit's error
+            # rather than aborting the shard, so the remaining units still run and still get
+            # recorded.
+            Test.record(
+                ts,
+                # XXX: `Base.catch_stack` is internal; `Base.current_exceptions()` is
+                # the public spelling — see `docs/src/testset-internals.md`.
+                Test.Error(
+                    :nontest_error, Expr(:tuple), err, Base.catch_stack(), LineNumberNode(0)
+                ),
+            )
+        end
     end
     # A tool that attaches a finished testset to its parent can only do it now that the parent is
-    # current again — which is the whole reason a hand-popped testset needs this second step.
+    # current again — which is the whole reason a hand-entered testset needs this second step.
     _unit_close(ts)
     dt = time() - t0
     sec = unit_fold(ctx, ts)
@@ -243,6 +271,14 @@ docstring for the whole picture.
 
 The test root — what unit keys are relative to — is the directory of the file this macro is
 written in, so keys are stable no matter where CI runs from.
+
+A unit must `wait`/`fetch`/`@sync` every task it spawns before its own top-level code returns.
+A unit is folded and reported the moment that code returns, so a result arriving later is
+recorded into a testset nobody reads again. On Julia ≥ 1.13 this is worse than it sounds: a
+spawned task inherits the unit's testset for its whole life, so a LATE FAILURE lands on the
+right object after the unit has already been reported green. Before 1.13 the same result was
+dropped on the floor instead — deterministically, which is the only thing that made it
+survivable.
 """
 macro shard(body)
     root = abspath(dirname(String(__source__.file)))

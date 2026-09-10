@@ -20,6 +20,7 @@ makedocs(;
         "Records" => "records.md",
         "Guarantees" => "guarantees.md",
         "Composing" => "composing.md",
+        "Testset internals" => "testset-internals.md",
         "API" => "api.md",
         "References" => "references.md",
     ],

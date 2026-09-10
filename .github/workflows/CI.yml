@@ -130,7 +130,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        julia: ['1.10']
+        julia: ['1.10', '1.11', '1.12', '1.13']
     steps:
       - uses: actions/checkout@v7
       - uses: julia-actions/setup-julia@v3
