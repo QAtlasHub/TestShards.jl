@@ -17,7 +17,9 @@ removed the need for.
 
 ## What Julia 1.13 changed
 
-Through 1.12, "the current testset" was a **stack in task-local storage**:
+Through 1.12, "the current testset" was a **stack in task-local storage** (quoting
+`stdlib/Test/src/Test.jl`, so these two blocks are not runnable here — the first no longer
+exists on 1.13, the second not before it):
 
 ```julia
 function push_testset(ts::AbstractTestSet)                     # julia ≤ 1.12
@@ -41,17 +43,45 @@ local storage", and `Test.@testset` itself now expands to `@with(CURRENT_TESTSET
 TESTSET_DEPTH => get_testset_depth() + 1, expr)`.
 
 `_with_testset` is that difference and nothing else. Everything downstream — `_unit_close`,
-`unit_fold`, the records, the printed line — sees the same thing either way.
+`unit_fold`, the records, the printed line — sees the same thing either way, which is the
+contract both implementations have to meet:
+
+```jldoctest
+julia> using Test, TestShards
+
+julia> ts = Test.DefaultTestSet("a unit");
+
+julia> outer = Test.get_testset_depth();
+
+julia> TestShards._with_testset(ts) do
+           Test.get_testset() === ts, Test.get_testset_depth() - outer
+       end
+(true, 1)
+
+julia> Test.get_testset_depth() == outer
+true
+```
+
+The depth is asserted as an INCREMENT, not as `1`: it counts from whatever is already open, so
+the absolute value depends on the caller — inside Documenter's own testset this block reads `2`
+where a bare session reads `1`. One level deeper, and back where it started, is the property
+`_with_testset` actually has.
 
 ## Why the branch tests the name, not the version
 
 `@static if isdefined(Test, :CURRENT_TESTSET)`, not `VERSION >= v"1.13"`.
 
 The two agree on every released version — measured on 1.10, 1.11, 1.12, 1.13 and 1.14-DEV — and
-disagree in exactly the place a version test is wrong: `v"1.13.0-rc1" >= v"1.13"` is `false`,
-because a prerelease sorts before its own release. An rc **has** `CURRENT_TESTSET`, so a version
-test would send it down the branch that calls `push_testset` and it would die on the very bug
-this split exists to avoid.
+disagree in exactly the place a version test is wrong, because a prerelease sorts before its own
+release:
+
+```jldoctest
+julia> v"1.13.0-rc1" >= v"1.13"
+false
+```
+
+An rc **has** `CURRENT_TESTSET`, so a version test would send it down the branch that calls
+`push_testset` and it would die on the very bug this split exists to avoid.
 
 ## Why `TESTSET_DEPTH` moves with `CURRENT_TESTSET`
 
