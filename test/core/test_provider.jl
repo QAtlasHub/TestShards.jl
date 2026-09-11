@@ -127,7 +127,7 @@ end
     # cover it. Before, the resulting `MethodError` escaped `_run`: the unit went
     # unrecorded, every unit after it never ran, and the failure read as a TestShards
     # internal rather than as the unit that could not load.
-    ctx = TestShards._begin(mktempdir())
+    ctx = bare_context(; shard="", nshards=1)
     ran = String[]
     with_provider(; open=k -> PartialSet(k), fold=partial_fold) do
         TestShards._run(ctx, "u1.jl", () -> (push!(ran, "u1"); @test true))
