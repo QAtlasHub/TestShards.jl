@@ -5,7 +5,7 @@ isdefined(Main, :TSHelpers) || include(joinpath(@__DIR__, "helpers.jl"))
 using .TSHelpers
 
 # The unit-testset provider seam, exercised with a STUB provider — no other package involved. The
-# contract is what matters here: the type a unit runs in, the second step a hand-popped testset
+# contract is what matters here: the type a unit runs in, the second step a hand-entered testset
 # needs, and the fold that keeps the counts right when the testset is not ours. The real consumer
 # (Pinax) is tested end to end in `test_pinax.jl`.
 
@@ -119,4 +119,23 @@ end
     finally
         TestShards.UNIT_PROVIDER[] = saved
     end
+end
+
+@testset "a provider that cannot record an Error does not truncate the shard" begin
+    # The only way to reach `_run`'s Error branch is a unit whose body THROWS — not an
+    # ordinary `@test` failure — so a provider author testing assertions has no reason to
+    # cover it. Before, the resulting `MethodError` escaped `_run`: the unit went
+    # unrecorded, every unit after it never ran, and the failure read as a TestShards
+    # internal rather than as the unit that could not load.
+    ctx = TestShards._begin(mktempdir())
+    ran = String[]
+    with_provider(; open=k -> PartialSet(k), fold=partial_fold) do
+        TestShards._run(ctx, "u1.jl", () -> (push!(ran, "u1"); @test true))
+        TestShards._run(ctx, "u2.jl", () -> (push!(ran, "u2"); error("a load error")))
+        TestShards._run(ctx, "u3.jl", () -> (push!(ran, "u3"); @test true))
+    end
+    @test ran == ["u1", "u2", "u3"]                      # the shard was not truncated
+    @test [r.key for r in ctx.records] == ["u1.jl", "u2.jl", "u3.jl"]
+    u2 = only(filter(r -> r.key == "u2.jl", ctx.records))
+    @test u2.nerror >= 1                                 # ...and the unit that threw is NOT green
 end

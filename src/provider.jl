@@ -122,10 +122,21 @@ _duration(ts) =
         0.0
     end
 
+# Julia 1.13 gave `DefaultTestSet` a `results_lock` and takes it on every `record`. Take it on
+# the read too, and copy rather than iterate under it, since `_section` recurses. A unit that
+# left a task running — which `@shard` forbids — would otherwise have this walk a vector being
+# pushed to.
+_results_snapshot(ts::Test.DefaultTestSet) =
+    if hasfield(Test.DefaultTestSet, :results_lock)
+        @lock ts.results_lock copy(ts.results)
+    else
+        ts.results
+    end
+
 function _section(ctx::ShardContext, ts::Test.DefaultTestSet)
     npass = nfail = nerror = nbroken = 0
     kids = Section[]
-    for r in ts.results
+    for r in _results_snapshot(ts)
         if r isa Test.DefaultTestSet
             s = _section(ctx, r)
             push!(kids, s)
