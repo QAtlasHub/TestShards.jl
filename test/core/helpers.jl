@@ -9,7 +9,7 @@ using TestShards
 export make_suite, run_suite, unit_keys
 export shared_suite, whole_units, partition_check, shard_runs_clean
 export bare_context, shard_window, lcov_trace
-export StubSet, stub_fold, with_provider
+export StubSet, PartialSet, stub_fold, partial_fold, with_provider
 
 const PROJ = dirname(Base.active_project())
 
@@ -222,6 +222,21 @@ mutable struct StubSet <: Test.AbstractTestSet
     closed::Bool
 end
 StubSet(desc::AbstractString) = StubSet(String(desc), 0, 0, 0, 0, false)
+
+"""
+A provider testset that records `Pass`/`Fail`/`Broken` but NOT `Error` — the shape a provider
+author naturally ends up with, since only a THROWING unit reaches the error branch.
+"""
+mutable struct PartialSet <: Test.AbstractTestSet
+    description::String
+    n::Int
+end
+PartialSet(desc::AbstractString) = PartialSet(String(desc), 0)
+Test.record(ts::PartialSet, r::Test.Pass) = (ts.n += 1; r)
+Test.record(ts::PartialSet, r::Test.Fail) = (ts.n += 1; r)
+Test.record(ts::PartialSet, r::Test.Broken) = (ts.n += 1; r)
+Test.finish(ts::PartialSet) = ts
+partial_fold(ts::PartialSet) = (; npass=ts.n, nfail=0, nerror=0, nbroken=0, sections=())
 
 function Test.record(ts::StubSet, res)
     res isa Test.Pass && (ts.npass += 1)

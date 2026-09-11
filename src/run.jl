@@ -31,6 +31,47 @@ function _key(ctx::ShardContext, path::AbstractString)
     return replace(relpath(abspath(path), ctx.root), '\\' => '/')
 end
 
+# Record a unit's escaping error on its testset, and say whether that worked.
+#
+# `_run` catches so the shard survives a unit that throws. Recording must not undo that: a
+# provider's testset type with no `Test.record` for `Test.Error` makes the record call itself
+# throw, and before this that MethodError escaped `_run` — the unit went unrecorded, every unit
+# after it never ran, and the failure surfaced as a TestShards internal rather than as the unit
+# that could not load.
+#
+# Tested by doing it, not by `hasmethod`: a catch-all `record(ts, ::Any)` that throws for
+# `Test.Error` satisfies `hasmethod` and still fails here.
+function _record_unit_error(ts, key, err)
+    try
+        Test.record(
+            ts,
+            # XXX: `Base.catch_stack` is internal; `Base.current_exceptions()` is
+            # the public spelling — see `docs/src/testset-internals.md`.
+            Test.Error(
+                :nontest_error, Expr(:tuple), err, Base.catch_stack(), LineNumberNode(0)
+            ),
+        )
+        return true
+    catch record_err
+        @error "TestShards: $(key) threw, and its testset could not record the error. The \
+                unit is counted as errored and the shard continues." unit_error = err record_err
+        return false
+    end
+end
+
+function _plus_one_error(s::Section)
+    return Section(
+        s.name,
+        s.duration,
+        s.npass,
+        s.nfail,
+        s.nerror + 1,
+        s.nbroken,
+        s.evidence,
+        s.sections,
+    )
+end
+
 """
     _run(ctx, key, body)
 
@@ -50,6 +91,7 @@ function _run(ctx::ShardContext, key::AbstractString, body)
 
     ts = _unit_testset(key)
     t0 = time()
+    recorded = true
     _with_testset(ts) do
         try
             body()
@@ -57,14 +99,7 @@ function _run(ctx::ShardContext, key::AbstractString, body)
             # An error escaping the unit (a load error, say) is recorded as the unit's error
             # rather than aborting the shard, so the remaining units still run and still get
             # recorded.
-            Test.record(
-                ts,
-                # XXX: `Base.catch_stack` is internal; `Base.current_exceptions()` is
-                # the public spelling — see `docs/src/testset-internals.md`.
-                Test.Error(
-                    :nontest_error, Expr(:tuple), err, Base.catch_stack(), LineNumberNode(0)
-                ),
-            )
+            recorded = _record_unit_error(ts, key, err)
         end
     end
     # A tool that attaches a finished testset to its parent can only do it now that the parent is
@@ -72,6 +107,9 @@ function _run(ctx::ShardContext, key::AbstractString, body)
     _unit_close(ts)
     dt = time() - t0
     sec = unit_fold(ctx, ts)
+    # The unit failed; its testset just could not say so. Count it anyway, or the shard
+    # reports green for a unit that threw.
+    recorded || (sec = _plus_one_error(sec))
     push!(
         ctx.records,
         UnitRecord(
